@@ -4,6 +4,11 @@
 
 # YouDub WebUI
 
+<p align="center">
+  <strong>QQ group: 618246010</strong><br />
+  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ group QR code" width="260" />
+</p>
+
 An open-source video localization tool proven in a real creator workflow.
 
 YouDub WebUI turns a single YouTube or Bilibili video into a dubbed video in the target language. It downloads the source video, separates vocals from background audio, transcribes speech, translates the transcript, generates new voiceover, mixes audio, burns subtitles, and produces a final video that can be played or downloaded from the web UI.

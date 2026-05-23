@@ -4,6 +4,11 @@
 
 # YouDub WebUI
 
+<p align="center">
+  <strong>QQ 交流群：618246010</strong><br />
+  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ 交流群二维码" width="260" />
+</p>
+
 一个被真实创作者工作流验证过的开源视频本地化工具。
 
 YouDub WebUI 可以把单个 YouTube 或 Bilibili 视频自动转换成目标语言配音版：下载视频、分离人声与背景音、识别字幕、翻译、生成配音、混音、压制字幕，最后输出可在线播放和下载的新视频。
