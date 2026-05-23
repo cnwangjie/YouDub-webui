@@ -5,8 +5,7 @@
 # YouDub WebUI
 
 <p align="center">
-  <strong>QQ group: 618246010</strong><br />
-  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ group QR code" width="260" />
+  <strong>QQ group: 618246010</strong>
 </p>
 
 An open-source video localization tool proven in a real creator workflow.
@@ -352,6 +351,14 @@ Contributions are welcome:
 - Add runtime notes for more platforms.
 
 If this project is useful to you, please Star it, Fork it, open Issues or PRs, and share it with people interested in AI video localization, open-source tools, and cross-language content.
+
+## Community
+
+QQ group: `618246010`
+
+<p align="center">
+  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ group QR code" width="220" />
+</p>
 
 ## License
 

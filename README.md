@@ -5,8 +5,7 @@
 # YouDub WebUI
 
 <p align="center">
-  <strong>QQ 交流群：618246010</strong><br />
-  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ 交流群二维码" width="260" />
+  <strong>QQ 交流群：618246010</strong>
 </p>
 
 一个被真实创作者工作流验证过的开源视频本地化工具。
@@ -352,6 +351,14 @@ YouDub WebUI 仍然是 MVP，但已经可以支撑真实创作者的日常视频
 - 补充不同平台的运行说明。
 
 如果这个项目对你有帮助，欢迎 Star、Fork、提交 Issue 或 PR，也欢迎分享给关注 AI 视频本地化、开源工具和跨语言内容传播的人。
+
+## 社区交流
+
+QQ 交流群：`618246010`
+
+<p align="center">
+  <img src="apps/web/public/qq-group-618246010.jpg" alt="YouDub QQ 交流群二维码" width="220" />
+</p>
 
 ## 开源许可
 
