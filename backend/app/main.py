@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import database, worker
-from .adapters.local_video import remove_upload, upload_dir
+from .adapters.local_subtitles import uploaded_subtitle_dir
+from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_translate import list_models as list_openai_models
 from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
 from .pipeline import run_task
@@ -22,8 +23,10 @@ from .sanitize import sanitize_text
 from .youtube import LOCAL_UPLOAD_DIRECTIONS, extract_video_id, is_local_upload_url
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
+ALLOWED_SUBTITLE_SUFFIXES = {".srt"}
 LOCAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_LOCAL_UPLOAD_BYTES = int(os.getenv("LOCAL_UPLOAD_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
+MAX_LOCAL_SUBTITLE_BYTES = int(os.getenv("LOCAL_SUBTITLE_MAX_BYTES", str(20 * 1024 * 1024)))
 
 
 def mask_secret(value: str) -> str:
@@ -172,7 +175,18 @@ def _clean_upload_filename(filename: str | None) -> str:
     return f"{safe_stem}{suffix}"
 
 
-def _save_uploaded_file(file: UploadFile, destination: Path) -> int:
+def _clean_subtitle_filename(filename: str | None) -> str:
+    original = Path(filename or "").name.strip()
+    if not original:
+        raise HTTPException(status_code=422, detail="Subtitle filename is required.")
+    suffix = Path(original).suffix.lower()
+    if suffix not in ALLOWED_SUBTITLE_SUFFIXES:
+        raise HTTPException(status_code=422, detail="Only .srt subtitle files are supported.")
+    safe_stem = sanitize_text(Path(original).stem) or "subtitles"
+    return f"{safe_stem}{suffix}"
+
+
+def _save_uploaded_file(file: UploadFile, destination: Path, *, max_bytes: int, too_large_detail: str) -> int:
     total = 0
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as handle:
@@ -181,18 +195,22 @@ def _save_uploaded_file(file: UploadFile, destination: Path) -> int:
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_LOCAL_UPLOAD_BYTES:
+            if total > max_bytes:
                 destination.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="Uploaded video is too large.")
+                raise HTTPException(status_code=413, detail=too_large_detail)
             handle.write(chunk)
     if total == 0:
         destination.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail="Uploaded video is empty.")
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
     return total
 
 
 @app.post("/api/tasks/upload", status_code=201)
-def upload_local_video(direction: str = Form("en-zh"), file: UploadFile = File(...)) -> dict:
+def upload_local_video(
+    direction: str = Form("en-zh"),
+    file: UploadFile = File(...),
+    subtitle_file: UploadFile | None = File(None),
+) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
 
@@ -200,9 +218,21 @@ def upload_local_video(direction: str = Form("en-zh"), file: UploadFile = File(.
     original_name = Path(file.filename or "").name.strip()
     stored_name = _clean_upload_filename(original_name)
     task_id = str(uuid.uuid4())
-    target_dir = upload_dir(WORKFOLDER, task_id)
     try:
-        _save_uploaded_file(file, target_dir / stored_name)
+        _save_uploaded_file(
+            file,
+            uploaded_video_dir(WORKFOLDER, task_id) / stored_name,
+            max_bytes=MAX_LOCAL_UPLOAD_BYTES,
+            too_large_detail="Uploaded video is too large.",
+        )
+        if subtitle_file is not None and subtitle_file.filename:
+            subtitle_name = _clean_subtitle_filename(subtitle_file.filename)
+            _save_uploaded_file(
+                subtitle_file,
+                uploaded_subtitle_dir(WORKFOLDER, task_id) / subtitle_name,
+                max_bytes=MAX_LOCAL_SUBTITLE_BYTES,
+                too_large_detail="Uploaded subtitle is too large.",
+            )
     except HTTPException:
         remove_upload(WORKFOLDER, task_id)
         raise

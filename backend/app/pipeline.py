@@ -12,7 +12,7 @@ from .devices import device_plan_summary
 from .runtime_checks import validate_runtime_device
 from .sources import detect_source
 from .stages import STAGES
-from .youtube import is_local_upload_url
+from .youtube import is_local_upload_url, local_upload_task_id
 
 
 @dataclass
@@ -138,6 +138,23 @@ class PipelineRunner:
                 return entry["status"]
         return None
 
+    def _uploaded_subtitle_path(self, task: dict) -> Path | None:
+        if not is_local_upload_url(task["url"]):
+            return None
+        from .adapters.local_subtitles import uploaded_subtitle_file
+
+        return uploaded_subtitle_file(WORKFOLDER, local_upload_task_id(task["url"]))
+
+    def _write_uploaded_subtitle_artifacts(self, task: dict) -> tuple[Path, Path, Path]:
+        from .adapters.local_subtitles import write_uploaded_subtitle_artifacts
+
+        session = _require(self.artifacts.session, "session")
+        subtitle_file = self._uploaded_subtitle_path(task)
+        if not subtitle_file:
+            raise RuntimeError("Missing uploaded subtitle file.")
+        source = detect_source(task["url"])
+        return write_uploaded_subtitle_artifacts(subtitle_file, session, source)
+
     def _run_stage(self, stage: str) -> None:
         if self._stage_status(stage) == "succeeded":
             database.update_task(self.task_id, current_stage=stage)
@@ -244,9 +261,23 @@ class PipelineRunner:
 
     def _asr(self, task: dict) -> None:
         import json as _json
-        from .adapters.whisper_asr import recognize_speech
 
         session = _require(self.artifacts.session, "session")
+        subtitle_file = self._uploaded_subtitle_path(task)
+        if subtitle_file:
+            asr_file, asr_fixed_file, translation_file = self._write_uploaded_subtitle_artifacts(task)
+            self.artifacts.asr_file = asr_file
+            self.artifacts.asr_fixed_file = asr_fixed_file
+            self.artifacts.translation_file = translation_file
+            items = _json.loads(translation_file.read_text(encoding="utf-8"))["translation"]
+            self.stage_message(
+                "asr",
+                f"Used uploaded SRT subtitles ({len(items)} cues) -> {asr_file.name}; skipped Whisper",
+            )
+            return
+
+        from .adapters.whisper_asr import recognize_speech
+
         vocals_file = _require(self.artifacts.vocals_file, "vocals_file")
         source = detect_source(task["url"])
         self.artifacts.asr_file = recognize_speech(vocals_file, session, language=source.asr_language)
@@ -260,9 +291,24 @@ class PipelineRunner:
 
     def _asr_fix(self, task: dict) -> None:
         import json as _json
-        from .adapters.asr_sentence_fixer import fix_asr_sentences
 
         session = _require(self.artifacts.session, "session")
+        if self._uploaded_subtitle_path(task):
+            self.artifacts.asr_fixed_file = _require_existing(
+                session / "metadata" / "asr_fixed.json",
+                "asr_fixed_file",
+            )
+            sentences = _json.loads(
+                self.artifacts.asr_fixed_file.read_text(encoding="utf-8")
+            )["result"]["utterances"]
+            self.stage_message(
+                "asr_fix",
+                f"Reused uploaded SRT subtitles ({len(sentences)} cues); skipped sentence splitting",
+            )
+            return
+
+        from .adapters.asr_sentence_fixer import fix_asr_sentences
+
         asr_file = _require(self.artifacts.asr_file, "asr_file")
         before = len(_json.loads(asr_file.read_text(encoding="utf-8"))["result"]["utterances"])
         source = detect_source(task["url"])
@@ -275,12 +321,27 @@ class PipelineRunner:
 
     def _translate(self, task: dict) -> None:
         import json as _json
-        from .adapters.openai_translate import translate_asr
 
         session = _require(self.artifacts.session, "session")
+        source = detect_source(task["url"])
+        if self._uploaded_subtitle_path(task):
+            self.artifacts.translation_file = _require_existing(
+                session / "metadata" / f"translation.{source.target_language}.json",
+                "translation_file",
+            )
+            items = _json.loads(
+                self.artifacts.translation_file.read_text(encoding="utf-8")
+            )["translation"]
+            self.stage_message(
+                "translate",
+                f"Reused uploaded translated SRT ({len(items)} cues); skipped OpenAI translation",
+            )
+            return
+
+        from .adapters.openai_translate import translate_asr
+
         asr_file = _require(self.artifacts.asr_fixed_file, "asr_fixed_file")
         settings = database.get_openai_settings()
-        source = detect_source(task["url"])
         self.stage_message(
             "translate",
             f"Using model {settings['model']} at {settings['base_url']} ({source.asr_language}->{source.target_language})",

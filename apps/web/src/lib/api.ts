@@ -134,10 +134,13 @@ export function createTask(url: string) {
   })
 }
 
-export async function uploadLocalTask(file: File, direction: LocalDirection) {
+export async function uploadLocalTask(file: File, direction: LocalDirection, subtitleFile?: File | null) {
   const form = new FormData()
   form.append("direction", direction)
   form.append("file", file)
+  if (subtitleFile) {
+    form.append("subtitle_file", subtitleFile)
+  }
 
   const response = await fetch(`${API_BASE}/api/tasks/upload`, {
     method: "POST",

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 from backend.app import database
 from backend.app import pipeline
+from backend.app.adapters import local_subtitles
 from backend.app.pipeline import PipelineRunner
 
 
@@ -186,3 +189,84 @@ def test_stage_progress_is_throttled(monkeypatch, tmp_path):
     stage = {entry["name"]: entry for entry in database.get_task(task_id)["stages"]}["tts"]
     assert stage["progress"] == 30
     assert stage["last_message"] == "Prepared 3/10 TTS clips"
+
+
+def test_pipeline_uses_uploaded_srt_and_skips_model_stages(monkeypatch, tmp_path):
+    configure_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "WORKFOLDER", tmp_path)
+    task_id = "local-subtitle-task"
+    task_url = f"local://upload/{task_id}?direction=en-zh&filename=clip.mp4"
+    task_id = database.create_task(task_url, task_id=task_id)
+    session = tmp_path / "session"
+    for directory in ("media", "metadata", "segments/vocals", "segments/tts", "tmp"):
+        (session / directory).mkdir(parents=True, exist_ok=True)
+    subtitle_dir = local_subtitles.uploaded_subtitle_dir(tmp_path, task_id)
+    subtitle_dir.mkdir(parents=True)
+    (subtitle_dir / "clip.zh.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n你好\n\n"
+        "2\n00:00:01,200 --> 00:00:02,000\n世界\n",
+        encoding="utf-8",
+    )
+
+    def fail_model_call(*args, **kwargs):
+        raise AssertionError("model stage should be skipped")
+
+    whisper_module = types.ModuleType("backend.app.adapters.whisper_asr")
+    whisper_module.recognize_speech = fail_model_call
+    fixer_module = types.ModuleType("backend.app.adapters.asr_sentence_fixer")
+    fixer_module.fix_asr_sentences = fail_model_call
+    translate_module = types.ModuleType("backend.app.adapters.openai_translate")
+    translate_module.translate_asr = fail_model_call
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.whisper_asr", whisper_module)
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.asr_sentence_fixer", fixer_module)
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.openai_translate", translate_module)
+
+    def download(self, task):
+        self.artifacts.session = session
+        self.artifacts.video_file = session / "media" / "video_source.mp4"
+        self.artifacts.video_file.write_bytes(b"mp4")
+        database.update_task(self.task_id, session_path=str(session), title="clip")
+
+    def separate(self, task):
+        self.artifacts.vocals_file = session / "media" / "audio_vocals.wav"
+        self.artifacts.bgm_file = session / "media" / "audio_bgm.wav"
+        self.artifacts.vocals_file.write_bytes(b"vocals")
+        self.artifacts.bgm_file.write_bytes(b"bgm")
+
+    def split_audio(self, task):
+        self.artifacts.vocals_dir = session / "segments" / "vocals"
+
+    def tts(self, task):
+        self.artifacts.tts_dir = session / "segments" / "tts"
+
+    def merge_audio(self, task):
+        self.artifacts.dubbing_file = session / "tmp" / "audio_dubbing.wav"
+        self.artifacts.timings_file = session / "metadata" / "timings.json"
+        self.artifacts.dubbing_file.write_bytes(b"dubbing")
+        self.artifacts.timings_file.write_text(
+            (session / "metadata" / "translation.zh.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    def merge_video(self, task):
+        self.artifacts.final_video = session / "media" / "video_final.mp4"
+        self.artifacts.final_video.write_bytes(b"mp4")
+
+    monkeypatch.setattr(PipelineRunner, "_download", download)
+    monkeypatch.setattr(PipelineRunner, "_separate", separate)
+    monkeypatch.setattr(PipelineRunner, "_split_audio", split_audio)
+    monkeypatch.setattr(PipelineRunner, "_tts", tts)
+    monkeypatch.setattr(PipelineRunner, "_merge_audio", merge_audio)
+    monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)
+
+    PipelineRunner(task_id).run()
+
+    task = database.get_task(task_id)
+    translation_file = session / "metadata" / "translation.zh.json"
+    translation = __import__("json").loads(translation_file.read_text(encoding="utf-8"))["translation"]
+    log_content = database.log_path(task_id).read_text(encoding="utf-8")
+    assert task["status"] == "succeeded"
+    assert [item["dst"] for item in translation] == ["你好", "世界"]
+    assert "skipped Whisper" in log_content
+    assert "skipped sentence splitting" in log_content
+    assert "skipped OpenAI translation" in log_content
