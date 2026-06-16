@@ -57,9 +57,11 @@ export default function Home() {
   const router = useRouter()
   const { activeTasksText, stageLabel, statusLabel, t } = useI18n()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const subtitleInputRef = useRef<HTMLInputElement>(null)
   const [youtubeUrl, setYoutubeUrl] = useState("")
   const [bilibiliUrl, setBilibiliUrl] = useState("")
   const [localFile, setLocalFile] = useState<File | null>(null)
+  const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [error, setError] = useState("")
@@ -95,6 +97,11 @@ export default function Home() {
     setLocalFile(event.target.files?.[0] || null)
   }
 
+  function selectLocalSubtitleFile(event: ChangeEvent<HTMLInputElement>) {
+    setError("")
+    setLocalSubtitleFile(event.target.files?.[0] || null)
+  }
+
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError("")
@@ -103,13 +110,17 @@ export default function Home() {
     setSubmitting(true)
     try {
       const created = localFile
-        ? await uploadLocalTask(localFile, localDirection)
+        ? await uploadLocalTask(localFile, localDirection, localSubtitleFile)
         : await createTask(submittedUrl)
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
+      setLocalSubtitleFile(null)
       if (fileInputRef.current) {
         fileInputRef.current.value = ""
+      }
+      if (subtitleInputRef.current) {
+        subtitleInputRef.current.value = ""
       }
       refreshTasks().catch(() => undefined)
       router.push(`/tasks/${created.id}`)
@@ -184,6 +195,20 @@ export default function Home() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="local-subtitle">{t.home.localSubtitleLabel}</Label>
+                <Input
+                  ref={subtitleInputRef}
+                  id="local-subtitle"
+                  type="file"
+                  accept=".srt"
+                  onChange={selectLocalSubtitleFile}
+                  disabled={hasUrl}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t.home.localSubtitleHelp}
+                </p>
               </div>
               <div className="flex items-center justify-between gap-3">
                 {queued > 0 ? (

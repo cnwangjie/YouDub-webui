@@ -217,6 +217,8 @@ Common environment variables:
 | `OPENAI_API_KEY` | API key used by the translation stage. |
 | `OPENAI_MODEL` | Chat Completions model used by the translation stage. |
 | `OPENAI_TRANSLATE_CONCURRENCY` | Parallel requests during translation. Default: `50`. |
+| `LOCAL_UPLOAD_MAX_BYTES` | Maximum local video upload size. Default: 4 GiB. |
+| `LOCAL_SUBTITLE_MAX_BYTES` | Maximum optional local SRT subtitle upload size. Default: 20 MiB. |
 | `YTDLP_PROXY_PORT` | Local proxy port used by yt-dlp, for example `7890`. |
 | `HTTP_PROXY` / `ALL_PROXY` | yt-dlp reads `HTTP_PROXY` when no UI proxy port is set; HTTPX/OpenAI SDK also reads these environment proxies. |
 | `NO_PROXY` | Comma-separated proxy bypass list. Include `localhost,127.0.0.1,::1` when using a local OpenAI-compatible service so local requests stay direct. |
@@ -278,7 +280,9 @@ When opening the app from LAN, WSL2, or another machine, use the actual frontend
 4. Enter the OpenAI base URL and API key.
 5. Click `Get models` to fetch model IDs, or enter a model manually.
 6. Tune `Translate concurrency` based on your API provider's rate limits.
-7. Return to the home page and submit a YouTube URL or Bilibili URL.
+7. Return to the home page and submit a YouTube URL, Bilibili URL, or local video.
+   - Local videos can include an already translated `.srt` file. When provided, YouDub skips Whisper and OpenAI translation, then uses that subtitle file for TTS and burned subtitles.
+   - The translation direction determines the subtitle target language. For example, `English -> Chinese` treats the uploaded SRT as Chinese subtitles.
 8. Open the task detail page to watch stage progress, logs, and the final video.
 
 API keys and cookies are masked in the UI. The backend does not return plaintext cookie content to the frontend.
@@ -308,6 +312,8 @@ YouTube / Bilibili URL
   -> Voiceover timing is aligned and mixed with background audio
   -> FFmpeg burns subtitles and renders the final mp4
 ```
+
+Local video uploads use the same later pipeline stages. If an already translated `.srt` file is uploaded with the video, YouDub converts the SRT into its internal timed translation format, skips Whisper and OpenAI translation, then continues with reference-audio splitting, TTS, audio mixing, and burned subtitles. In v1 this is limited to local video uploads with `.srt`; URL tasks cannot attach subtitle files.
 
 ## Highlights
 

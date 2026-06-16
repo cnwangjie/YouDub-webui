@@ -16,10 +16,23 @@ def upload_dir(workfolder: Path, task_id: str) -> Path:
     return workfolder / "_uploads" / task_id
 
 
+def uploaded_video_dir(workfolder: Path, task_id: str) -> Path:
+    return upload_dir(workfolder, task_id) / "video"
+
+
 def remove_upload(workfolder: Path, task_id: str) -> None:
     target = upload_dir(workfolder, task_id)
     if target.exists():
         shutil.rmtree(target)
+
+
+def _single_file(root: Path, task_id: str, label: str) -> Path:
+    files = sorted(path for path in root.iterdir() if path.is_file())
+    if not files:
+        raise FileNotFoundError(f"Local upload {label} is missing for task {task_id}.")
+    if len(files) > 1:
+        raise RuntimeError(f"Local upload has multiple {label} files for task {task_id}.")
+    return files[0]
 
 
 def _uploaded_video_file(workfolder: Path, task_id: str) -> Path:
@@ -27,12 +40,10 @@ def _uploaded_video_file(workfolder: Path, task_id: str) -> Path:
     if not root.exists():
         raise FileNotFoundError(f"Local upload is missing for task {task_id}.")
 
-    files = sorted(path for path in root.iterdir() if path.is_file())
-    if not files:
-        raise FileNotFoundError(f"Local upload is missing for task {task_id}.")
-    if len(files) > 1:
-        raise RuntimeError(f"Local upload has multiple files for task {task_id}.")
-    return files[0]
+    video_root = uploaded_video_dir(workfolder, task_id)
+    if video_root.exists():
+        return _single_file(video_root, task_id, "video")
+    return _single_file(root, task_id, "video")
 
 
 def _title_from_url(url: str, source_file: Path) -> str:
@@ -76,11 +87,14 @@ def _transcode_to_mp4(source_file: Path, video_file: Path) -> None:
 
 
 def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tuple[Path, dict]:
+    from .local_subtitles import uploaded_subtitle_file
+
     task_id = local_upload_task_id(url)
     if not task_id:
         raise ValueError("Invalid local upload URL.")
 
     source_file = _uploaded_video_file(workfolder, task_id)
+    subtitle_file = uploaded_subtitle_file(workfolder, task_id)
     title = _title_from_url(url, source_file)
     session = _session_path(workfolder, task_id, title)
     media_dir = session / "media"
@@ -98,6 +112,8 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
         "asr_language": source.asr_language,
         "target_language": source.target_language,
     }
+    if subtitle_file:
+        info["subtitle_path"] = str(subtitle_file)
     metadata_file = metadata_dir / "local_info.json"
     metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
 
