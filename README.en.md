@@ -213,10 +213,12 @@ Common environment variables:
 | `MODEL_CACHE_DIR` | ModelScope cache directory, used by VoxCPM2 by default. |
 | `DEVICE` | Model runtime device, for example `auto`, `cuda`, `cuda:0`, `mps`, `mps:0`, or `cpu`; `auto` selects CUDA, then MPS, then CPU. |
 | `DEMUCS_DEVICE` / `WHISPER_DEVICE` | Optional component-level device overrides. Empty values use `DEVICE`. Whisper falls back to CPU when MPS is selected because word timestamp alignment depends on float64 DTW, which MPS does not support. |
+| `FFMPEG_VIDEO_ENCODER` | Final video encoder. Default: `auto`; uses GPU NVENC when `h264_nvenc` is available, otherwise falls back to `libx264`. Set `libx264` or `h264_nvenc` to force one. |
 | `OPENAI_BASE_URL` | OpenAI-compatible API endpoint, for example `https://api.openai.com/v1`. |
 | `OPENAI_API_KEY` | API key used by the translation stage. |
 | `OPENAI_MODEL` | Chat Completions model used by the translation stage. |
 | `OPENAI_TRANSLATE_CONCURRENCY` | Parallel requests during translation. Default: `50`. |
+| `OPENAI_TIMEOUT_SECONDS` | Timeout in seconds for each Chat Completions request. Default: `60`. |
 | `LOCAL_UPLOAD_MAX_BYTES` | Maximum local video upload size. Default: 4 GiB. |
 | `LOCAL_SUBTITLE_MAX_BYTES` | Maximum optional local SRT subtitle upload size. Default: 20 MiB. |
 | `YTDLP_PROXY_PORT` | Local proxy port used by yt-dlp, for example `7890`. |

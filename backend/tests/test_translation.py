@@ -166,6 +166,74 @@ def test_translate_asr_invokes_translate_batch_with_all_texts_at_once(tmp_path, 
     assert seen[0]["pre"].hotwords[0].src == "x"
 
 
+def test_translate_asr_resumes_from_partial_cache(tmp_path, monkeypatch):
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    asr_file = metadata / "asr.json"
+    _write_asr(asr_file, 3)
+    partial = metadata / "translation_partial.zh.json"
+    partial.write_text(
+        json.dumps({"items": [{"index": 0, "src": "S0.", "dst": "cached:S0."}]}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    progress: list[tuple[int, int, str]] = []
+
+    _stub_preprocess(monkeypatch)
+
+    def fake_call_json(client, model, system, user):
+        calls.append(user)
+        return {"dst": f"zh:{user}"}
+
+    monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
+    monkeypatch.setattr(openai_translate, "_client", lambda *a, **kw: object())
+
+    out = openai_translate.translate_asr(
+        asr_file,
+        tmp_path,
+        {**_settings(), "translate_concurrency": "2"},
+        YT_SOURCE,
+        progress_callback=lambda done, total, message: progress.append((done, total, message)),
+    )
+
+    items = json.loads(out.read_text(encoding="utf-8"))["translation"]
+    assert sorted(calls) == ["S1.", "S2."]
+    assert [item["dst"] for item in items] == ["cached:S0.", "zh:S1.", "zh:S2."]
+    assert not partial.exists()
+    assert progress[0][:2] == (1, 3)
+    assert progress[-1][:2] == (3, 3)
+
+
+def test_translate_asr_keeps_partial_cache_after_failure(tmp_path, monkeypatch):
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    asr_file = metadata / "asr.json"
+    _write_asr(asr_file, 3)
+
+    _stub_preprocess(monkeypatch)
+
+    def fake_call_json(client, model, system, user):
+        if user == "S1.":
+            raise ValueError("boom")
+        return {"dst": f"zh:{user}"}
+
+    monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
+    monkeypatch.setattr(openai_translate, "_client", lambda *a, **kw: object())
+
+    with pytest.raises(RuntimeError, match="translate_sentence failed"):
+        openai_translate.translate_asr(
+            asr_file,
+            tmp_path,
+            {**_settings(), "translate_concurrency": "1"},
+            YT_SOURCE,
+        )
+
+    partial = metadata / "translation_partial.zh.json"
+    cached = json.loads(partial.read_text(encoding="utf-8"))["items"]
+    assert {"index": 0, "src": "S0.", "dst": "zh:S0."} in cached
+    assert not (metadata / "translation.zh.json").exists()
+
+
 def test_translate_batch_replaces_em_dash_for_zh_target(monkeypatch):
     monkeypatch.setattr(openai_translate, "_call_json", lambda *a, **kw: {"dst": "你好——世界"})
     monkeypatch.setattr(openai_translate, "_client", lambda *a, **kw: object())

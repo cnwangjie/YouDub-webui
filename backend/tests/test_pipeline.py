@@ -126,6 +126,47 @@ def test_pipeline_skips_already_succeeded_stages(monkeypatch, tmp_path):
     assert task["final_video_path"] == str(final_path)
 
 
+def test_translate_stage_reports_progress_and_log(monkeypatch, tmp_path):
+    configure_db(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=abcdefghijk", task_id="abcdefghijk")
+    session = tmp_path / "session"
+    metadata = session / "metadata"
+    metadata.mkdir(parents=True)
+    asr_fixed = metadata / "asr_fixed.json"
+    asr_fixed.write_text(json.dumps({"result": {"utterances": []}}), encoding="utf-8")
+
+    database.save_openai_settings("https://example.com/v1", "sk-test", "model-x")
+
+    def fake_translate_asr(asr_file, session_path, settings, source, progress_callback=None, log_callback=None):
+        assert asr_file == asr_fixed
+        if log_callback:
+            log_callback("fake internal translate step")
+        if progress_callback:
+            progress_callback(1, 2, "Translated 1/2 sentences")
+            progress_callback(2, 2, "Translated 2/2 sentences")
+        out = metadata / "translation.zh.json"
+        out.write_text(json.dumps({"translation": []}), encoding="utf-8")
+        return out
+
+    translate_module = types.ModuleType("backend.app.adapters.openai_translate")
+    translate_module.translate_asr = fake_translate_asr
+    translate_module.preprocess_artifact_path = lambda session_path: metadata / "translation_preprocess.json"
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.openai_translate", translate_module)
+
+    runner = PipelineRunner(task_id)
+    runner.artifacts.session = session
+    runner.artifacts.asr_fixed_file = asr_fixed
+    runner._translate(database.get_task(task_id))
+
+    stage = {entry["name"]: entry for entry in database.get_task(task_id)["stages"]}["translate"]
+    log_content = database.log_path(task_id).read_text(encoding="utf-8")
+    assert stage["progress"] == 100
+    assert stage["last_message"] == "Translated 0 sentences -> translation.zh.json"
+    assert "[translate] fake internal translate step" in log_content
+    assert "[translate] Translated 1/2 sentences" in log_content
+    assert "[translate] Translated 2/2 sentences" in log_content
+
+
 def test_pipeline_fails_when_succeeded_stage_cache_is_missing(monkeypatch, tmp_path):
     configure_db(monkeypatch, tmp_path)
     task_id = database.create_task("https://www.youtube.com/watch?v=missingvidx", task_id="missingvidx")
@@ -369,4 +410,3 @@ def test_pipeline_uses_uploaded_srt_and_skips_model_stages(monkeypatch, tmp_path
     assert "skipped Whisper" in log_content
     assert "skipped sentence splitting" in log_content
     assert "skipped OpenAI translation" in log_content
-

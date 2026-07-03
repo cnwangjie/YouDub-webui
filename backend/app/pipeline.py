@@ -376,7 +376,22 @@ class PipelineRunner:
             "translate",
             f"Using model {settings['model']} at {settings['base_url']} ({source.asr_language}->{source.target_language})",
         )
-        self.artifacts.translation_file = translate_asr(asr_file, session, settings, source)
+        def progress(done: int, total: int, message: str) -> None:
+            percent = 100 if total <= 0 else round((done / total) * 100)
+            self.stage_progress("translate", percent, message, force=done >= total)
+            self.log(f"[translate] {message}")
+
+        def translate_log(message: str) -> None:
+            self.log(f"[translate] {message}")
+
+        self.artifacts.translation_file = translate_asr(
+            asr_file,
+            session,
+            settings,
+            source,
+            progress_callback=progress,
+            log_callback=translate_log,
+        )
         items = _json.loads(self.artifacts.translation_file.read_text(encoding="utf-8"))["translation"]
         self.stage_message(
             "translate",
@@ -431,7 +446,16 @@ class PipelineRunner:
         dubbing_file = _require(self.artifacts.dubbing_file, "dubbing_file")
         bgm_file = _require(self.artifacts.bgm_file, "bgm_file")
         timings_file = _require(self.artifacts.timings_file, "timings_file")
-        self.artifacts.final_video = merge_video(video_file, dubbing_file, bgm_file, timings_file, session)
+        self.artifacts.final_video = merge_video(
+            video_file,
+            dubbing_file,
+            bgm_file,
+            timings_file,
+            session,
+            progress_callback=lambda progress, message: self.stage_progress(
+                "merge_video", progress, message, force=progress >= 100
+            ),
+        )
         size_mb = self.artifacts.final_video.stat().st_size / (1024 * 1024)
         self.stage_message("merge_video", f"Final video: {self.artifacts.final_video} ({size_mb:.1f} MB)")
 

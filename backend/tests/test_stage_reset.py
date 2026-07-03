@@ -13,6 +13,7 @@ def test_collect_artifact_paths_from_translate(tmp_path):
     metadata.mkdir(parents=True)
     (metadata / "asr_fixed.json").write_text("{}", encoding="utf-8")
     (metadata / "translation.zh.json").write_text("{}", encoding="utf-8")
+    (metadata / "translation_partial.zh.json").write_text("{}", encoding="utf-8")
     (metadata / "translation_preprocess.json").write_text("{}", encoding="utf-8")
     (metadata / "subtitles.zh.srt").write_text("", encoding="utf-8")
     (session / "segments" / "vocals").mkdir(parents=True)
@@ -24,6 +25,7 @@ def test_collect_artifact_paths_from_translate(tmp_path):
 
     assert "metadata/translation_preprocess.json" in relative
     assert "metadata/translation.zh.json" in relative
+    assert "metadata/translation_partial.zh.json" in relative
     assert "metadata/asr_fixed.json" not in relative
     assert "segments/vocals" in relative
     assert "segments/tts" in relative
@@ -35,14 +37,17 @@ def test_remove_stage_artifacts_keeps_upstream(tmp_path):
     metadata.mkdir(parents=True)
     asr_fixed = metadata / "asr_fixed.json"
     translation = metadata / "translation.zh.json"
+    partial = metadata / "translation_partial.zh.json"
     asr_fixed.write_text("{}", encoding="utf-8")
     translation.write_text("{}", encoding="utf-8")
+    partial.write_text("{}", encoding="utf-8")
 
     source = detect_source("https://www.youtube.com/watch?v=abcdefghijk")
     remove_stage_artifacts(session, "translate", source)
 
     assert asr_fixed.exists()
     assert not translation.exists()
+    assert not partial.exists()
 
 
 def test_reset_stages_from_only_resets_downstream(monkeypatch, tmp_path):

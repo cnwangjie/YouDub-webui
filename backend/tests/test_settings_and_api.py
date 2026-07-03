@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -126,6 +127,63 @@ def test_cookie_response_does_not_leak_content(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["content"] == ""
     assert "secret-cookie-content" not in response.text
+
+
+def test_get_localized_metadata_reads_artifact(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=metadataabc", task_id="metadataabc")
+    session = config.WORKFOLDER / "uploader" / "title__metadataabc"
+    metadata = session / "metadata"
+    media = session / "media"
+    metadata.mkdir(parents=True)
+    media.mkdir()
+    thumbnail = media / "thumbnail.jpg"
+    thumbnail.write_bytes(b"jpg")
+    payload = {
+        "title": "Original",
+        "description": "Source description",
+        "tags": ["AI"],
+        "thumbnail_url": "https://example.com/thumb.jpg",
+        "thumbnail_file": str(thumbnail),
+        "translated_title": "翻译标题",
+        "translated_description": "翻译简介",
+        "translated_tags": ["人工智能"],
+    }
+    (metadata / "localized_metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+    database.update_task(task_id, session_path=str(session))
+    body = main.get_localized_metadata(task_id)
+
+    assert body["translated_title"] == "翻译标题"
+    assert body["thumbnail_api_url"] == f"/api/tasks/{task_id}/artifact/thumbnail"
+
+
+def test_generate_localized_metadata_uses_adapter(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=metadataxyz", task_id="metadataxyz")
+    session = config.WORKFOLDER / "uploader" / "title__metadataxyz"
+    (session / "metadata").mkdir(parents=True)
+    (session / "metadata" / "ytdlp_info.json").write_text("{}", encoding="utf-8")
+    database.update_task(task_id, session_path=str(session))
+
+    from backend.app.adapters import metadata_localization
+
+    def fake_localize(session_path, source):
+        assert session_path == session
+        return {
+            "title": "Original",
+            "description": "",
+            "tags": [],
+            "thumbnail_url": "",
+            "thumbnail_file": "",
+            "translated_title": "Translated",
+            "translated_description": "",
+            "translated_tags": [],
+        }
+
+    monkeypatch.setattr(metadata_localization, "localize_metadata", fake_localize)
+    body = main.generate_localized_metadata(task_id)
+
+    assert body["translated_title"] == "Translated"
 
 
 def test_task_id_is_video_id_and_dedupes_existing(monkeypatch, tmp_path):

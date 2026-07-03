@@ -442,6 +442,72 @@ def task_log(task_id: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _task_session(task: dict) -> Path:
+    session_path = task.get("session_path")
+    if not session_path:
+        raise HTTPException(status_code=409, detail="Task metadata is not available yet.")
+    session = Path(session_path)
+    if not session.exists() or not _is_inside_workfolder(session):
+        raise HTTPException(status_code=404, detail="Task session is not available.")
+    return session
+
+
+def _public_localized_metadata(task_id: str, payload: dict) -> dict:
+    thumbnail_file = payload.get("thumbnail_file")
+    thumbnail_api_url = ""
+    if thumbnail_file and Path(str(thumbnail_file)).exists():
+        thumbnail_api_url = f"/api/tasks/{task_id}/artifact/thumbnail"
+    return {**payload, "thumbnail_api_url": thumbnail_api_url}
+
+
+@app.get("/api/tasks/{task_id}/metadata/localized")
+def get_localized_metadata(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    from .adapters.metadata_localization import load_artifact
+
+    payload = load_artifact(session)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Localized metadata is not available.")
+    return _public_localized_metadata(task_id, payload)
+
+
+@app.post("/api/tasks/{task_id}/metadata/localized")
+def generate_localized_metadata(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    from .adapters.metadata_localization import localize_metadata
+
+    try:
+        payload = localize_metadata(session, detect_source(task["url"]))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to localize metadata: {exc}") from exc
+    return _public_localized_metadata(task_id, payload)
+
+
+@app.get("/api/tasks/{task_id}/artifact/thumbnail")
+def task_thumbnail(task_id: str) -> FileResponse:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    from .adapters.metadata_localization import load_artifact
+
+    payload = load_artifact(session)
+    thumbnail_file = Path(str((payload or {}).get("thumbnail_file") or ""))
+    if not payload or not thumbnail_file.exists() or not _is_inside_workfolder(thumbnail_file):
+        raise HTTPException(status_code=404, detail="Thumbnail is not available.")
+    return FileResponse(thumbnail_file)
+
+
 @app.get("/api/tasks/{task_id}/artifact/final-video")
 def final_video(task_id: str, download: bool = False) -> FileResponse:
     task = database.get_task(task_id)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from ..config import ffmpeg_binary, ffprobe_binary
 
@@ -25,6 +27,8 @@ SUBTITLE_FONT_SIZES = {
     "zh": {"portrait": 12, "landscape": 24},
     "en": {"portrait": 9, "landscape": 18},
 }
+
+ProgressCallback = Callable[[int, str], None]
 
 
 def _subtitle_style(font: str, size: int, margin_v: int) -> str:
@@ -247,7 +251,90 @@ def subtitle_filter(video_file: Path, subtitle_file: Path, session: Path) -> str
     return f"subtitles=filename='{sub_path}':force_style='{style}'"
 
 
-def merge_video(video_file: Path, dubbing_file: Path, bgm_file: Path, timings_file: Path, session: Path) -> Path:
+def _ffmpeg_has_encoder(encoder: str) -> bool:
+    result = subprocess.run(
+        [ffmpeg_binary(), "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and encoder in result.stdout
+
+
+def _video_encoder() -> tuple[str, list[str], str]:
+    configured = os.getenv("FFMPEG_VIDEO_ENCODER", "auto").strip().lower()
+    if configured in {"", "auto"}:
+        if _ffmpeg_has_encoder("h264_nvenc"):
+            return "h264_nvenc", ["-preset", "p4", "-cq", "23"], "GPU NVENC"
+        return "libx264", ["-preset", "fast", "-crf", "23"], "CPU libx264"
+    if configured in {"cpu", "libx264"}:
+        return "libx264", ["-preset", "fast", "-crf", "23"], "CPU libx264"
+    if configured in {"gpu", "nvenc", "h264_nvenc"}:
+        return "h264_nvenc", ["-preset", "p4", "-cq", "23"], "GPU NVENC"
+    return configured, [], configured
+
+
+def _video_encoder_is_auto() -> bool:
+    return os.getenv("FFMPEG_VIDEO_ENCODER", "auto").strip().lower() in {"", "auto"}
+
+
+def _timings_duration_ms(timings_file: Path) -> int:
+    data = json.loads(timings_file.read_text(encoding="utf-8"))
+    ends = [
+        int(item.get("actual_end_time", item.get("end_time", 0)) or 0)
+        for item in data.get("translation", [])
+    ]
+    return max(ends, default=0)
+
+
+def _run_ffmpeg_with_progress(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    duration_ms: int,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    if progress_callback is None or duration_ms <= 0:
+        subprocess.run(cmd, check=True, cwd=cwd)
+        return
+
+    process = subprocess.Popen(
+        cmd[:-1] + ["-progress", "pipe:1", "-nostats", cmd[-1]],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    last_progress = -1
+    for raw_line in process.stdout:
+        key, _, value = raw_line.strip().partition("=")
+        if key == "out_time_ms":
+            try:
+                progress = round(int(value) / 1000 / duration_ms * 100)
+            except ValueError:
+                continue
+            progress = max(0, min(99, progress))
+            if progress > last_progress:
+                last_progress = progress
+                progress_callback(progress, f"Rendering final video {progress}%")
+        elif key == "progress" and value == "end":
+            progress_callback(100, "Rendering final video 100%")
+
+    stderr = process.stderr.read() if process.stderr is not None else ""
+    returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd, stderr=stderr)
+
+
+def merge_video(
+    video_file: Path,
+    dubbing_file: Path,
+    bgm_file: Path,
+    timings_file: Path,
+    session: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     tmp_dir = session / "tmp"
     media_dir = session / "media"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -261,9 +348,13 @@ def merge_video(video_file: Path, dubbing_file: Path, bgm_file: Path, timings_fi
     dubbing_input = dubbing_file.resolve()
     bgm_input = bgm_file.resolve()
     subtitles = write_srt(timings_file, session)
+    duration_ms = _timings_duration_ms(timings_file)
+    encoder, encoder_args, encoder_label = _video_encoder()
     mixed_audio = tmp_dir / "audio_mixed.m4a"
     mixed_audio_output = mixed_audio.resolve()
     final_video_output = final_video.resolve()
+    if progress_callback:
+        progress_callback(1, f"Mixing audio before video render ({encoder_label})")
     subprocess.run(
         [
             ffmpeg_binary(),
@@ -282,34 +373,58 @@ def merge_video(video_file: Path, dubbing_file: Path, bgm_file: Path, timings_fi
         ],
         check=True,
     )
-    subprocess.run(
-        [
-            ffmpeg_binary(),
-            "-y",
-            "-i",
-            str(video_input),
-            "-i",
-            str(mixed_audio_output),
-            "-vf",
-            subtitle_filter(video_input, subtitles, session_dir),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
+    if progress_callback:
+        progress_callback(3, f"Rendering final video with {encoder_label}")
+    final_cmd = [
+        ffmpeg_binary(),
+        "-y",
+        "-i",
+        str(video_input),
+        "-i",
+        str(mixed_audio_output),
+        "-vf",
+        subtitle_filter(video_input, subtitles, session_dir),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        encoder,
+        *encoder_args,
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        str(final_video_output),
+    ]
+    try:
+        _run_ffmpeg_with_progress(
+            final_cmd,
+            cwd=session_dir,
+            duration_ms=duration_ms,
+            progress_callback=progress_callback,
+        )
+    except subprocess.CalledProcessError:
+        if encoder != "h264_nvenc" or not _video_encoder_is_auto():
+            raise
+        if final_video_output.exists():
+            final_video_output.unlink()
+        if progress_callback:
+            progress_callback(3, "GPU NVENC render failed; retrying with CPU libx264")
+        fallback_cmd = [
+            *final_cmd[: final_cmd.index("-c:v") + 1],
             "libx264",
             "-preset",
             "fast",
             "-crf",
             "23",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(final_video_output),
-        ],
-        check=True,
-        cwd=session_dir,
-    )
+            *final_cmd[final_cmd.index("-c:a") :],
+        ]
+        _run_ffmpeg_with_progress(
+            fallback_cmd,
+            cwd=session_dir,
+            duration_ms=duration_ms,
+            progress_callback=progress_callback,
+        )
     return final_video

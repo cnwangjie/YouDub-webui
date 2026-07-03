@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from io import StringIO
 from pathlib import Path
 
 from backend.app.adapters import ffmpeg
@@ -95,7 +96,7 @@ def test_merge_video_burns_portrait_subtitles(monkeypatch, tmp_path):
     )
 
     assert final_video == session / "media" / "video_final.mp4"
-    assert len(commands) == 3
+    assert len(commands) == 4
     final_command = commands[-1]
     filter_arg = final_command[final_command.index("-vf") + 1]
     assert filter_arg.startswith("subtitles=filename='metadata/subtitles.zh.srt'")
@@ -147,7 +148,7 @@ def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, 
         session,
     )
 
-    mix_command = commands[0]
+    mix_command = commands[1]
     final_command = commands[-1]
     assert Path(mix_command[mix_command.index("-i") + 1]).is_absolute()
     assert Path(mix_command[mix_command.index("-i", mix_command.index("-i") + 1) + 1]).is_absolute()
@@ -206,3 +207,30 @@ def test_probe_video_size_uses_configured_ffprobe(monkeypatch):
 
     assert ffmpeg.probe_video_size(Path("video.mp4")) == (1920, 1080)
     assert commands[0][0] == "/opt/bin/ffprobe"
+
+
+def test_run_ffmpeg_with_progress_reports_percent(monkeypatch, tmp_path):
+    calls: list[tuple[int, str]] = []
+    seen_cmds: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, cmd, **kwargs):
+            seen_cmds.append(cmd)
+            self.stdout = StringIO("out_time_ms=500000\nout_time_ms=1000000\nprogress=end\n")
+            self.stderr = StringIO("")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(ffmpeg.subprocess, "Popen", FakeProcess)
+
+    ffmpeg._run_ffmpeg_with_progress(
+        ["ffmpeg", "-y", "-i", "in.mp4", "out.mp4"],
+        cwd=tmp_path,
+        duration_ms=1000,
+        progress_callback=lambda progress, message: calls.append((progress, message)),
+    )
+
+    assert "-progress" in seen_cmds[0]
+    assert calls[0][0] == 50
+    assert calls[-1] == (100, "Rendering final video 100%")

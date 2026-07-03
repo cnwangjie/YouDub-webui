@@ -65,6 +65,20 @@ export type YtdlpSettings = {
 
 export type LocalDirection = "en-zh" | "zh-en"
 
+export type LocalizedMetadata = {
+  title: string
+  description: string
+  tags: string[]
+  thumbnail_url: string
+  thumbnail_file: string
+  thumbnail_api_url: string
+  translated_title: string
+  translated_description: string
+  translated_tags: string[]
+  model: string
+  base_url: string
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -178,6 +192,18 @@ export function continueTask(taskId: string, executionMode?: ExecutionMode) {
 
 export function redoStage(taskId: string, stageName: string) {
   return request<Task>(`/api/tasks/${taskId}/stages/${stageName}/redo`, { method: "POST" })
+}
+
+export function getLocalizedMetadata(taskId: string) {
+  return request<LocalizedMetadata>(`/api/tasks/${taskId}/metadata/localized`)
+}
+
+export function generateLocalizedMetadata(taskId: string) {
+  return request<LocalizedMetadata>(`/api/tasks/${taskId}/metadata/localized`, { method: "POST" })
+}
+
+export function thumbnailUrl(path: string) {
+  return `${API_BASE}${path}`
 }
 
 export function createTask(url: string, executionMode: ExecutionMode = "auto") {

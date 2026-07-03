@@ -23,6 +23,7 @@ STAGE_OWN_ARTIFACTS: dict[str, tuple[str, ...]] = {
 def _translation_globs(session: Path, target_language: str) -> list[Path]:
     metadata = session / "metadata"
     paths = list(metadata.glob(f"translation.{target_language}.json"))
+    paths.extend(metadata.glob(f"translation_partial.{target_language}.json"))
     paths.extend(metadata.glob("subtitles.*.srt"))
     return paths
 

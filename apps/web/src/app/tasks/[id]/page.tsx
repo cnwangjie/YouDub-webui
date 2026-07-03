@@ -7,26 +7,32 @@ import {
   Circle,
   Download,
   FileText,
+  Image as ImageIcon,
   Loader2,
   Play,
   RotateCw,
+  Tags,
   Trash2,
   XCircle,
 } from "lucide-react"
 
 import {
   ExecutionMode,
+  LocalizedMetadata,
   StageStatus,
   Task,
   continueTask,
   deleteTask,
   finalVideoDownloadUrl,
   finalVideoUrl,
+  generateLocalizedMetadata,
+  getLocalizedMetadata,
   getTask,
   getTaskLog,
   redoStage,
   rerunTask,
   resumeTask,
+  thumbnailUrl,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
 import { statusBadgeClass } from "@/lib/status"
@@ -103,6 +109,9 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [redoingStage, setRedoingStage] = useState<string | null>(null)
   const [redoConfirmStage, setRedoConfirmStage] = useState<string | null>(null)
   const [redoError, setRedoError] = useState("")
+  const [localizedMetadata, setLocalizedMetadata] = useState<LocalizedMetadata | null>(null)
+  const [localizingMetadata, setLocalizingMetadata] = useState(false)
+  const [localizedMetadataError, setLocalizedMetadataError] = useState("")
 
   const handleDelete = async () => {
     setDeleting(true)
@@ -178,6 +187,19 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     if (succeeded) setRedoConfirmStage(null)
   }
 
+  const handleLocalizeMetadata = async () => {
+    setLocalizingMetadata(true)
+    setLocalizedMetadataError("")
+    try {
+      const next = await generateLocalizedMetadata(id)
+      setLocalizedMetadata(next)
+    } catch (err) {
+      setLocalizedMetadataError(err instanceof Error ? err.message : t.task.localizedMetadataError)
+    } finally {
+      setLocalizingMetadata(false)
+    }
+  }
+
   const isRunning = task?.status === "running"
   const isQueued = task?.status === "queued"
   const isFailed = task?.status === "failed"
@@ -196,6 +218,13 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
         const logText = await getTaskLog(id)
         if (cancelled) return
         setLog(logText)
+        getLocalizedMetadata(id)
+          .then((metadata) => {
+            if (!cancelled) setLocalizedMetadata(metadata)
+          })
+          .catch(() => {
+            if (!cancelled) setLocalizedMetadata(null)
+          })
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : t.task.loadError)
       }
@@ -276,6 +305,86 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
               </dl>
             ) : (
               <div className="py-6 text-center text-sm text-muted-foreground">{t.task.loading}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <CardTitle>{t.task.localizedMetadata}</CardTitle>
+                <p className="mt-1 text-sm text-muted-foreground">{t.task.localizedMetadataHelp}</p>
+              </div>
+              <Button onClick={handleLocalizeMetadata} disabled={localizingMetadata || !task?.session_path}>
+                {localizingMetadata ? <Loader2 className="size-4 animate-spin" /> : <Tags className="size-4" />}
+                {localizingMetadata ? t.task.localizingMetadata : t.task.localizeMetadata}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {localizedMetadataError ? (
+              <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {localizedMetadataError}
+              </div>
+            ) : null}
+            {localizedMetadata ? (
+              <div className="grid gap-4 md:grid-cols-[220px_1fr]">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <ImageIcon className="size-4" />
+                    {t.task.cover}
+                  </div>
+                  {localizedMetadata.thumbnail_api_url || localizedMetadata.thumbnail_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={
+                        localizedMetadata.thumbnail_api_url
+                          ? thumbnailUrl(localizedMetadata.thumbnail_api_url)
+                          : localizedMetadata.thumbnail_url
+                      }
+                      alt={localizedMetadata.translated_title || localizedMetadata.title}
+                      className="aspect-video w-full rounded-md border border-border object-cover"
+                    />
+                  ) : (
+                    <div className="flex aspect-video items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+                      {t.task.noMetadata}
+                    </div>
+                  )}
+                </div>
+                <div className="grid gap-4 text-sm">
+                  <div className="grid gap-2">
+                    <Badge variant="secondary" className="w-fit">{t.task.translatedMetadata}</Badge>
+                    <p className="font-medium">{localizedMetadata.translated_title || localizedMetadata.title}</p>
+                    {localizedMetadata.translated_description ? (
+                      <p className="whitespace-pre-wrap text-muted-foreground">{localizedMetadata.translated_description}</p>
+                    ) : null}
+                    {localizedMetadata.translated_tags.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        {localizedMetadata.translated_tags.map((tag) => (
+                          <Badge key={tag} variant="outline">{tag}</Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="grid gap-2 border-t pt-3">
+                    <Badge variant="secondary" className="w-fit">{t.task.sourceMetadata}</Badge>
+                    <p className="font-medium">{localizedMetadata.title}</p>
+                    {localizedMetadata.description ? (
+                      <p className="line-clamp-6 whitespace-pre-wrap text-muted-foreground">{localizedMetadata.description}</p>
+                    ) : null}
+                    {localizedMetadata.tags.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        {localizedMetadata.tags.map((tag) => (
+                          <Badge key={tag} variant="outline">{tag}</Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">{t.task.noMetadata}</p>
             )}
           </CardContent>
         </Card>
