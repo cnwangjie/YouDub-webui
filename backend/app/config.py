@@ -37,7 +37,17 @@ def openai_defaults() -> dict[str, str]:
         "base_url": os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE") or "https://api.openai.com/v1",
         "api_key": os.getenv("OPENAI_API_KEY", ""),
         "model": os.getenv("OPENAI_MODEL") or os.getenv("OPENAI_MODEL_NAME") or "gpt-4o-mini",
-        "translate_concurrency": os.getenv("OPENAI_TRANSLATE_CONCURRENCY", "50"),
+        "translate_concurrency": os.getenv("OPENAI_TRANSLATE_CONCURRENCY", "5"),
+        "translate_use_batch": os.getenv("OPENAI_TRANSLATE_USE_BATCH", "true"),
+    }
+
+
+def openai_image_defaults() -> dict[str, str]:
+    image_api_key = os.getenv("OPENAI_IMAGE_API_KEY")
+    return {
+        "base_url": os.getenv("OPENAI_IMAGE_BASE_URL", "https://api.openai.com/v1"),
+        "api_key": image_api_key if image_api_key is not None else os.getenv("OPENAI_API_KEY", ""),
+        "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
     }
 
 
@@ -47,6 +57,16 @@ def ffmpeg_binary() -> str:
 
 def ffprobe_binary() -> str:
     return os.getenv("FFPROBE_PATH", "").strip() or "ffprobe"
+
+
+def bilibili_publish_defaults() -> dict[str, str]:
+    return {
+        "tid": os.getenv("BILIBILI_TID", "21"),
+        "copyright": os.getenv("BILIBILI_COPYRIGHT", "2"),
+        "line": os.getenv("BILIBILI_UPLOAD_LINE", "bda2"),
+        "threads": os.getenv("BILIBILI_UPLOAD_THREADS", "3"),
+        "source": os.getenv("BILIBILI_SOURCE", ""),
+    }
 
 
 def ytdlp_defaults() -> dict[str, str]:

@@ -5,6 +5,7 @@ import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Thread
 from typing import Literal
 from urllib.parse import quote
 
@@ -13,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from . import database, worker
+from . import cancellation, database, worker
 from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_translate import list_models as list_openai_models
+from .adapters.openai_translate import test_connection as test_openai_connection
 from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
 from .pipeline import run_task
 from .runtime_checks import validate_runtime_device
@@ -32,7 +34,7 @@ LOCAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_LOCAL_UPLOAD_BYTES = int(os.getenv("LOCAL_UPLOAD_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
 MAX_LOCAL_SUBTITLE_BYTES = int(os.getenv("LOCAL_SUBTITLE_MAX_BYTES", str(20 * 1024 * 1024)))
 
-TaskListStatus = Literal["all", "queued", "running", "paused", "succeeded", "failed"]
+TaskListStatus = Literal["all", "queued", "running", "paused", "succeeded", "failed", "cancelled"]
 TaskListExecutionMode = Literal["all", "auto", "manual"]
 TaskListSort = Literal[
     "created_desc",
@@ -47,6 +49,8 @@ TaskListSort = Literal[
     "title_desc",
 ]
 
+ACTIVE_BILIBILI_PUBLISHES: set[str] = set()
+
 
 def mask_secret(value: str) -> str:
     if not value:
@@ -57,6 +61,7 @@ def mask_secret(value: str) -> str:
 class TaskCreate(BaseModel):
     url: str
     execution_mode: str = "auto"
+    auto_start: bool = True
 
 
 class ContinueTaskRequest(BaseModel):
@@ -73,6 +78,7 @@ class OpenAISettingsUpdate(BaseModel):
     clear_api_key: bool = False
     model: str
     translate_concurrency: str = ""
+    translate_use_batch: bool = True
 
 
 class OpenAIModelsRequest(BaseModel):
@@ -80,8 +86,26 @@ class OpenAIModelsRequest(BaseModel):
     api_key: str = ""
 
 
+class OpenAITestRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
 class YtdlpSettingsUpdate(BaseModel):
     proxy_port: str = ""
+
+
+class BilibiliQrPollRequest(BaseModel):
+    auth_code: str
+
+
+class BilibiliPublishRequest(BaseModel):
+    title: str = ""
+    description: str = ""
+    source: str = ""
+    tags: list[str] | str = ""
+    tid: int | None = None
 
 
 def normalize_proxy_port(value: str) -> str:
@@ -110,12 +134,22 @@ def normalize_translate_concurrency(value: str) -> str:
     return concurrency
 
 
+def bool_setting(value: str) -> bool:
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_runtime_dirs()
     database.init_db()
     database.backfill_titles_from_metadata()
     database.fail_stale_active_tasks()
+    try:
+        from .adapters.bilibili_publish import fail_stale_running_publishes
+
+        fail_stale_running_publishes()
+    except Exception:
+        pass
     worker.start(run_task)
     yield
 
@@ -189,13 +223,16 @@ def create_task(payload: TaskCreate) -> dict:
     if existing_id:
         return database.get_task(existing_id)
 
-    _ensure_runtime_ready()
+    if payload.auto_start:
+        _ensure_runtime_ready()
     task_id = database.create_task(
         payload.url.strip(),
         task_id=video_id,
         execution_mode=normalize_execution_mode(payload.execution_mode),
+        auto_start=payload.auto_start,
     )
-    worker.enqueue(task_id)
+    if payload.auto_start:
+        worker.enqueue(task_id)
     return database.get_task(task_id)
 
 
@@ -255,11 +292,13 @@ def upload_local_video(
     file: UploadFile = File(...),
     subtitle_file: UploadFile | None = File(None),
     execution_mode: str = Form("auto"),
+    auto_start: bool = Form(True),
 ) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
 
-    _ensure_runtime_ready()
+    if auto_start:
+        _ensure_runtime_ready()
     original_name = Path(file.filename or "").name.strip()
     stored_name = _clean_upload_filename(original_name)
     task_id = str(uuid.uuid4())
@@ -289,9 +328,11 @@ def upload_local_video(
         url,
         task_id=task_id,
         execution_mode=normalize_execution_mode(execution_mode),
+        auto_start=auto_start,
     )
     database.update_task(task_id, title=Path(original_name).stem)
-    worker.enqueue(task_id)
+    if auto_start:
+        worker.enqueue(task_id)
     return database.get_task(task_id)
 
 
@@ -408,15 +449,30 @@ def continue_task(task_id: str, payload: ContinueTaskRequest | None = None) -> d
     task = database.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
-    if task["status"] != "paused":
-        raise HTTPException(status_code=409, detail="Only paused tasks can be continued.")
-    if (task.get("execution_mode") or database.DEFAULT_EXECUTION_MODE) != "manual":
-        raise HTTPException(status_code=409, detail="Only manual tasks can be continued step by step.")
+    if task["status"] not in {"paused", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Only paused or cancelled tasks can be continued.")
     if payload and payload.execution_mode is not None:
         database.update_task(task_id, execution_mode=normalize_execution_mode(payload.execution_mode))
     _ensure_runtime_ready()
     database.queue_task_for_continue(task_id)
     worker.enqueue(task_id)
+    return database.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if task["status"] == "cancelled":
+        return task
+    if task["status"] not in {"queued", "running", "paused"}:
+        raise HTTPException(status_code=409, detail="Only queued, running, or paused tasks can be cancelled.")
+    if task["status"] == "running":
+        cancellation.request_cancel(task_id)
+        database.mark_task_cancel_requested(task_id)
+    else:
+        database.cancel_task(task_id)
     return database.get_task(task_id)
 
 
@@ -508,6 +564,160 @@ def task_thumbnail(task_id: str) -> FileResponse:
     return FileResponse(thumbnail_file)
 
 
+@app.post("/api/bilibili/qrcode")
+def create_bilibili_qrcode() -> dict:
+    from .adapters.bilibili_publish import get_bilibili_qrcode
+
+    try:
+        return get_bilibili_qrcode()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to create Bilibili QR code: {exc}") from exc
+
+
+@app.post("/api/bilibili/qrcode/poll")
+def poll_bilibili_qrcode(payload: BilibiliQrPollRequest) -> dict:
+    from .adapters.bilibili_publish import poll_bilibili_qrcode
+
+    try:
+        return poll_bilibili_qrcode(payload.auth_code)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to poll Bilibili QR code: {exc}") from exc
+
+
+@app.get("/api/bilibili/credentials")
+def get_bilibili_credentials_status() -> dict:
+    credentials = database.get_bilibili_credentials()
+    if not credentials:
+        return {"configured": False}
+    cookies = credentials.get("cookie_info", {}).get("cookies") or []
+    names = [item.get("name") for item in cookies if isinstance(item, dict)]
+    return {
+        "configured": True,
+        "platform": credentials.get("platform") or "",
+        "has_bili_jct": "bili_jct" in names,
+        "has_sessdata": "SESSDATA" in names,
+    }
+
+
+@app.delete("/api/bilibili/credentials", status_code=204)
+def clear_bilibili_credentials() -> Response:
+    database.clear_bilibili_credentials()
+    return Response(status_code=204)
+
+
+@app.get("/api/bilibili/publish/records")
+def list_bilibili_publish_records() -> dict:
+    from .adapters.bilibili_publish import list_publish_records
+
+    return {"records": list_publish_records()}
+
+
+@app.get("/api/bilibili/account/archives")
+def list_bilibili_account_archives(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status: str = Query("is_pubed", max_length=40),
+) -> dict:
+    from .adapters.bilibili_publish import list_account_archives
+
+    try:
+        return list_account_archives(page=page, page_size=page_size, status=status)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to list Bilibili archives: {exc}") from exc
+
+
+@app.get("/api/bilibili/partitions")
+def list_bilibili_partitions() -> dict:
+    from .adapters.bilibili_publish import list_partitions
+
+    try:
+        return {"partitions": list_partitions()}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to list Bilibili partitions: {exc}") from exc
+
+
+def _publish_task_to_bilibili(task_id: str, overrides: dict | None = None) -> None:
+    try:
+        task = database.get_task(task_id)
+        if not task:
+            return
+        session = Path(str(task["session_path"]))
+        final_path = Path(str(task["final_video_path"]))
+        from .adapters.bilibili_publish import publish_to_bilibili
+
+        publish_to_bilibili(final_path, session, detect_source(task["url"]), overrides)
+    finally:
+        ACTIVE_BILIBILI_PUBLISHES.discard(task_id)
+
+
+@app.get("/api/tasks/{task_id}/bilibili/publish")
+def get_bilibili_publish_status(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    from .adapters.bilibili_publish import mark_stale_running_publish
+
+    if task_id in ACTIVE_BILIBILI_PUBLISHES:
+        from .adapters.bilibili_publish import load_publish_status
+
+        status = load_publish_status(session)
+    else:
+        status = mark_stale_running_publish(session)
+    if status is None:
+        return {"status": "idle", "progress": 0, "message": "", "error": "", "result": None}
+    return status
+
+
+@app.post("/api/tasks/{task_id}/bilibili/publish")
+def start_bilibili_publish(task_id: str, payload: BilibiliPublishRequest | None = None) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    final_path = task.get("final_video_path")
+    if not final_path or not Path(final_path).exists():
+        raise HTTPException(status_code=409, detail="Final video is not available.")
+    if not database.get_bilibili_credentials():
+        raise HTTPException(status_code=409, detail="Bilibili credentials are not configured. Scan QR code first.")
+    from .adapters.bilibili_publish import load_publish_status, mark_stale_running_publish, write_publish_status
+
+    current = load_publish_status(session) if task_id in ACTIVE_BILIBILI_PUBLISHES else mark_stale_running_publish(session)
+    if current and current.get("status") == "running":
+        return current
+    overrides = payload.model_dump() if payload else {}
+    previous = current or {}
+    for key in ("title", "description", "source", "tags", "tid"):
+        if overrides.get(key):
+            continue
+        if previous.get(key):
+            overrides[key] = previous[key]
+    tags = overrides.get("tags")
+    if isinstance(tags, str):
+        tag_text = tags
+    else:
+        tag_text = ",".join(str(tag).strip() for tag in tags if str(tag).strip())
+    status = write_publish_status(
+        session,
+        {
+            "status": "running",
+            "progress": 0,
+            "message": "Queued Bilibili publish",
+            "title": overrides.get("title", "").strip(),
+            "description": overrides.get("description", "").strip(),
+            "source": overrides.get("source", "").strip(),
+            "tags": [tag.strip() for tag in tag_text.replace("，", ",").replace("\n", ",").split(",") if tag.strip()][:10],
+            "tid": overrides.get("tid"),
+            "error": "",
+            "result": None,
+            "video_file": str(final_path),
+        },
+    )
+    ACTIVE_BILIBILI_PUBLISHES.add(task_id)
+    Thread(target=_publish_task_to_bilibili, args=(task_id, overrides), daemon=True).start()
+    return status
+
+
 @app.get("/api/tasks/{task_id}/artifact/final-video")
 def final_video(task_id: str, download: bool = False) -> FileResponse:
     task = database.get_task(task_id)
@@ -551,6 +761,7 @@ def get_openai_settings() -> dict:
         "has_api_key": bool(settings["api_key"]),
         "model": settings["model"],
         "translate_concurrency": settings["translate_concurrency"],
+        "translate_use_batch": bool_setting(settings["translate_use_batch"]),
     }
 
 
@@ -561,6 +772,7 @@ def save_openai_settings(payload: OpenAISettingsUpdate) -> dict:
         payload.api_key,
         payload.model,
         normalize_translate_concurrency(payload.translate_concurrency),
+        "true" if payload.translate_use_batch else "false",
         clear_api_key=payload.clear_api_key,
     )
     return get_openai_settings()
@@ -578,6 +790,38 @@ def get_openai_models(payload: OpenAIModelsRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch models: {exc}") from exc
     return {"models": models}
+
+
+@app.post("/api/settings/openai/test")
+def test_openai_settings(payload: OpenAITestRequest) -> dict:
+    settings = database.get_openai_settings()
+    base_url = payload.base_url.strip() or settings["base_url"]
+    api_key = payload.api_key.strip() or settings["api_key"]
+    model = payload.model.strip() or settings["model"]
+    try:
+        result = test_openai_connection(base_url=base_url, api_key=api_key, model=model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"OpenAI connection test failed: {exc}") from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/settings/sync-env")
+def sync_settings_from_env() -> dict:
+    synced = database.sync_settings_from_env()
+    openai = synced["openai"]
+    return {
+        "openai": {
+            "base_url": openai["base_url"],
+            "api_key": mask_secret(openai["api_key"]),
+            "has_api_key": bool(openai["api_key"]),
+            "model": openai["model"],
+            "translate_concurrency": openai["translate_concurrency"],
+            "translate_use_batch": bool_setting(openai["translate_use_batch"]),
+        },
+        "ytdlp": synced["ytdlp"],
+    }
 
 
 @app.get("/api/settings/ytdlp")

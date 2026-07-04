@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { use, useEffect, useMemo, useState } from "react"
 import {
@@ -11,6 +12,7 @@ import {
   Loader2,
   Play,
   RotateCw,
+  Send,
   Tags,
   Trash2,
   XCircle,
@@ -21,6 +23,7 @@ import {
   LocalizedMetadata,
   StageStatus,
   Task,
+  cancelTask,
   continueTask,
   deleteTask,
   finalVideoDownloadUrl,
@@ -106,6 +109,9 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [resumeError, setResumeError] = useState("")
   const [continuing, setContinuing] = useState(false)
   const [continueError, setContinueError] = useState("")
+  const [cancelOpen, setCancelOpen] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState("")
   const [redoingStage, setRedoingStage] = useState<string | null>(null)
   const [redoConfirmStage, setRedoConfirmStage] = useState<string | null>(null)
   const [redoError, setRedoError] = useState("")
@@ -166,6 +172,20 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     }
   }
 
+  const handleCancelTask = async () => {
+    setCancelling(true)
+    setCancelError("")
+    try {
+      const next = await cancelTask(id)
+      setTask(next)
+      setCancelOpen(false)
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : t.task.cancelError)
+    } finally {
+      setCancelling(false)
+    }
+  }
+
   const handleRedoStage = async (stageName: string) => {
     setRedoingStage(stageName)
     setRedoError("")
@@ -204,6 +224,9 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const isQueued = task?.status === "queued"
   const isFailed = task?.status === "failed"
   const isPaused = task?.status === "paused"
+  const isCancelled = task?.status === "cancelled"
+  const canContinue = isPaused || isCancelled
+  const isCancellable = Boolean(task && ["queued", "running", "paused"].includes(task.status))
   const isManual = task?.execution_mode === "manual"
   const canRedoStage = isManual && !isRunning && !isQueued
   const redoConfirmStageInfo = task?.stages.find((stage) => stage.name === redoConfirmStage)
@@ -403,10 +426,16 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 className="w-full rounded-md border border-emerald-200 bg-black"
               />
               <p className="break-all text-xs text-muted-foreground">{task.final_video_path}</p>
-              <Button nativeButton={false} render={<a href={finalVideoDownloadUrl(task.id)} />}>
-                <Download className="size-4" />
-                {t.task.download}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button nativeButton={false} render={<a href={finalVideoDownloadUrl(task.id)} />}>
+                  <Download className="size-4" />
+                  {t.task.download}
+                </Button>
+                <Button variant="outline" nativeButton={false} render={<Link href="/bilibili" />}>
+                  <Send className="size-4" />
+                  {t.task.bilibiliPublish}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         ) : null}
@@ -511,7 +540,7 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            {isPaused ? (
+            {canContinue ? (
               <div className="mt-4 space-y-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm text-sky-900">{t.task.continueHelp}</p>
@@ -606,6 +635,43 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                     <Button onClick={handleRerun} disabled={rerunning}>
                       {rerunning ? <Loader2 className="size-4 animate-spin" /> : <RotateCw className="size-4" />}
                       {rerunning ? t.task.rerunning : t.task.confirmRerun}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm text-muted-foreground">
+                {t.task.cancelHelp}
+              </p>
+              <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
+                <DialogTrigger
+                  render={
+                    <Button variant="outline" disabled={!isCancellable}>
+                      <XCircle className="size-4" />
+                      {t.task.cancelTask}
+                    </Button>
+                  }
+                />
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>{t.task.cancelTitle}</DialogTitle>
+                    <DialogDescription>
+                      {t.task.cancelDescription}
+                    </DialogDescription>
+                  </DialogHeader>
+                  {cancelError ? (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {cancelError}
+                    </div>
+                  ) : null}
+                  <DialogFooter>
+                    <DialogClose render={<Button variant="outline" disabled={cancelling} />}>
+                      {t.common.cancel}
+                    </DialogClose>
+                    <Button variant="destructive" onClick={handleCancelTask} disabled={cancelling}>
+                      {cancelling ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
+                      {cancelling ? t.task.cancelling : t.task.confirmCancel}
                     </Button>
                   </DialogFooter>
                 </DialogContent>

@@ -21,7 +21,9 @@ def enqueue(task_id: str) -> None:
 def _loop(runner: Callable[[str], None]) -> None:
     while True:
         task_id = _queue.get()
-        runner(task_id)
+        task = database.get_task(task_id)
+        if task and task["status"] == "queued":
+            runner(task_id)
         _queue.task_done()
 
 

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import DB_PATH, ensure_runtime_dirs, openai_defaults, ytdlp_defaults
+from dotenv import load_dotenv
+
+from .config import DB_PATH, REPO_ROOT, ensure_runtime_dirs, openai_defaults, ytdlp_defaults
 from .stages import STAGES
 
 
 ACTIVE_STATUSES = ("queued", "running")
 EXECUTION_MODES = ("auto", "manual")
 DEFAULT_EXECUTION_MODE = "auto"
+TASK_STATUSES = ("queued", "running", "paused", "succeeded", "failed", "cancelled")
 
 
 def now_iso() -> str:
@@ -146,17 +150,19 @@ def create_task(
     task_id: str | None = None,
     *,
     execution_mode: str = DEFAULT_EXECUTION_MODE,
+    auto_start: bool = True,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
     mode = normalize_execution_mode(execution_mode)
+    status = "queued" if auto_start else "paused"
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO tasks (id, url, status, current_stage, created_at, execution_mode)
-            VALUES (?, ?, 'queued', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (new_id, url, STAGES[0].name, created_at, mode),
+            (new_id, url, status, STAGES[0].name, created_at, mode),
         )
         conn.executemany(
             """
@@ -210,8 +216,9 @@ TASK_LIST_SORTS = {
         "WHEN 'queued' THEN 1 "
         "WHEN 'running' THEN 2 "
         "WHEN 'paused' THEN 3 "
-        "WHEN 'failed' THEN 4 "
-        "WHEN 'succeeded' THEN 5 "
+        "WHEN 'cancelled' THEN 4 "
+        "WHEN 'failed' THEN 5 "
+        "WHEN 'succeeded' THEN 6 "
         "ELSE 99 END ASC, created_at DESC, rowid DESC"
     ),
     "status_desc": (
@@ -219,8 +226,9 @@ TASK_LIST_SORTS = {
         "WHEN 'queued' THEN 1 "
         "WHEN 'running' THEN 2 "
         "WHEN 'paused' THEN 3 "
-        "WHEN 'failed' THEN 4 "
-        "WHEN 'succeeded' THEN 5 "
+        "WHEN 'cancelled' THEN 4 "
+        "WHEN 'failed' THEN 5 "
+        "WHEN 'succeeded' THEN 6 "
         "ELSE 99 END DESC, created_at DESC, rowid DESC"
     ),
     "title_asc": "LOWER(COALESCE(NULLIF(TRIM(title), ''), url)) ASC, created_at DESC, rowid DESC",
@@ -291,6 +299,22 @@ def list_tasks_page(
     }
 
 
+def list_bilibili_candidate_tasks(limit: int = 500) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, url, title, status, session_path, final_video_path,
+                   created_at, completed_at
+            FROM tasks
+            WHERE session_path IS NOT NULL OR final_video_path IS NOT NULL
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_task(task_id: str) -> dict[str, Any] | None:
     with connect() as conn:
         task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -343,6 +367,44 @@ def queue_task_for_continue(task_id: str) -> None:
             """,
             (task_id,),
         )
+
+
+def cancel_task(task_id: str, message: str = "Task cancelled by user.") -> None:
+    completed_at = now_iso()
+    with connect() as conn:
+        task = conn.execute("SELECT current_stage FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled', error_message = ?, completed_at = ?
+            WHERE id = ?
+            """,
+            (message, completed_at, task_id),
+        )
+        if task and task["current_stage"] and task["current_stage"] != "done":
+            conn.execute(
+                """
+                UPDATE task_stages
+                SET status = 'failed', error_message = ?, completed_at = ?, last_message = ?
+                WHERE task_id = ? AND name = ? AND status = 'running'
+                """,
+                (message, completed_at, message, task_id, task["current_stage"]),
+            )
+
+
+def mark_task_cancel_requested(task_id: str, message: str = "Cancellation requested.") -> None:
+    with connect() as conn:
+        task = conn.execute("SELECT current_stage FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        conn.execute("UPDATE tasks SET error_message = ? WHERE id = ?", (message, task_id))
+        if task and task["current_stage"] and task["current_stage"] != "done":
+            conn.execute(
+                """
+                UPDATE task_stages
+                SET last_message = ?
+                WHERE task_id = ? AND name = ? AND status = 'running'
+                """,
+                (message, task_id, task["current_stage"]),
+            )
 
 
 def reset_stages_from(task_id: str, from_stage: str) -> None:
@@ -443,6 +505,9 @@ def get_openai_settings() -> dict[str, str]:
         "translate_concurrency": get_setting(
             "openai.translate_concurrency", defaults["translate_concurrency"]
         ),
+        "translate_use_batch": get_setting(
+            "openai.translate_use_batch", defaults["translate_use_batch"]
+        ),
     }
 
 
@@ -451,6 +516,7 @@ def save_openai_settings(
     api_key: str,
     model: str,
     translate_concurrency: str = "",
+    translate_use_batch: str = "true",
     *,
     clear_api_key: bool = False,
 ) -> None:
@@ -465,6 +531,7 @@ def save_openai_settings(
     set_setting("openai.model", model.strip())
     if translate_concurrency.strip():
         set_setting("openai.translate_concurrency", translate_concurrency.strip())
+    set_setting("openai.translate_use_batch", translate_use_batch.strip().lower())
 
 
 def get_ytdlp_settings() -> dict[str, str]:
@@ -474,8 +541,46 @@ def get_ytdlp_settings() -> dict[str, str]:
     }
 
 
+def get_bilibili_credentials() -> dict[str, Any] | None:
+    raw = get_setting("bilibili.credentials", "")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_bilibili_credentials(credentials: dict[str, Any]) -> None:
+    set_setting("bilibili.credentials", json.dumps(credentials, ensure_ascii=False))
+
+
+def clear_bilibili_credentials() -> None:
+    set_setting("bilibili.credentials", "")
+
+
 def save_ytdlp_settings(proxy_port: str) -> None:
     set_setting("ytdlp.proxy_port", proxy_port.strip())
+
+
+def sync_settings_from_env() -> dict[str, dict[str, str]]:
+    load_dotenv(REPO_ROOT / ".env", override=True)
+    openai = openai_defaults()
+    save_openai_settings(
+        openai["base_url"],
+        openai["api_key"],
+        openai["model"],
+        openai["translate_concurrency"],
+        openai["translate_use_batch"],
+        clear_api_key=not bool(openai["api_key"].strip()),
+    )
+    ytdlp = ytdlp_defaults()
+    save_ytdlp_settings(ytdlp["proxy_port"])
+    return {
+        "openai": get_openai_settings(),
+        "ytdlp": get_ytdlp_settings(),
+    }
 
 
 def log_path(task_id: str) -> Path:

@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { ArrowLeft } from "lucide-react"
+import { ArrowLeft, Send } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings-dialog"
@@ -32,7 +32,13 @@ export function AppHeader({ backHref }: { backHref?: string }) {
           />
         </Link>
       </div>
-      <SettingsDialog />
+      <div className="flex items-center gap-2">
+        <Button variant="outline" nativeButton={false} render={<Link href="/bilibili" />}>
+          <Send className="size-4" />
+          {t.bilibili.nav}
+        </Button>
+        <SettingsDialog />
+      </div>
     </header>
   )
 }

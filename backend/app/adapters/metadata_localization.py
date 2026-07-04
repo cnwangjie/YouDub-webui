@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from pathlib import Path
@@ -7,7 +8,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from openai import OpenAI
 
+from ..config import openai_image_defaults
 from ..database import get_openai_settings
 from ..sources import SourceConfig
 from .openai_client import normalize_openai_base_url
@@ -18,6 +21,7 @@ log = logging.getLogger(__name__)
 DESCRIPTION_LIMIT = 4000
 TAG_LIMIT = 40
 THUMBNAIL_TIMEOUT_SECONDS = 20
+IMAGE_EDIT_TIMEOUT_SECONDS = 180
 
 
 def artifact_path(session: Path) -> Path:
@@ -110,6 +114,100 @@ def download_thumbnail(session: Path, url: str) -> Path | None:
     return path
 
 
+def _cover_prompt(
+    *,
+    source: SourceConfig,
+    title: str,
+    translated_title: str,
+    description: str,
+    translated_description: str,
+    tags: list[str],
+) -> str:
+    return f"""Edit this video thumbnail for a localized publication.
+
+Goal:
+- Translate any visible text in the image from {source.asr_language_name} into {source.target_language_name}.
+- Preserve the original composition, subject, style, colors, branding, faces, objects, and overall layout.
+- Keep the image usable as a 16:9 video cover.
+- Do not add unrelated text, watermarks, logos, badges, QR codes, or extra claims.
+- If the image has no readable text, preserve the image and make only minimal layout-safe refinements.
+- Make all rendered text crisp and readable.
+
+Localized title for context:
+{translated_title or title}
+
+Original title:
+{title}
+
+Translated description for context:
+{translated_description or description}
+
+Localized tags:
+{json.dumps(tags, ensure_ascii=False)}
+"""
+
+
+def translate_thumbnail(
+    session: Path,
+    thumbnail_file: Path | None,
+    *,
+    source: SourceConfig,
+    title: str,
+    translated_title: str,
+    description: str,
+    translated_description: str,
+    translated_tags: list[str],
+) -> tuple[Path | None, dict[str, Any]]:
+    settings = openai_image_defaults()
+    metadata: dict[str, Any] = {
+        "model": settings["model"],
+        "base_url": normalize_openai_base_url(settings["base_url"]),
+        "error": "",
+    }
+    if not thumbnail_file or not thumbnail_file.exists():
+        metadata["error"] = "Thumbnail file is not available."
+        return None, metadata
+    if not settings["api_key"]:
+        metadata["error"] = "OpenAI image API key is not configured."
+        return None, metadata
+
+    client = OpenAI(
+        api_key=settings["api_key"],
+        base_url=normalize_openai_base_url(settings["base_url"]),
+        timeout=IMAGE_EDIT_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    output_file = session / "media" / "thumbnail.localized.png"
+    prompt = _cover_prompt(
+        source=source,
+        title=title,
+        translated_title=translated_title,
+        description=description,
+        translated_description=translated_description,
+        tags=translated_tags,
+    )
+    try:
+        with thumbnail_file.open("rb") as image:
+            response = client.images.edit(
+                model=settings["model"],
+                image=image,
+                prompt=prompt,
+                size="auto",
+                quality="high",
+                input_fidelity="high",
+                output_format="png",
+                response_format="b64_json",
+            )
+        if not response.data or not response.data[0].b64_json:
+            raise RuntimeError("OpenAI image edit response did not include image data.")
+        output_file.write_bytes(base64.b64decode(response.data[0].b64_json))
+        return output_file, metadata
+    except Exception as exc:
+        log.warning("Failed to translate thumbnail with OpenAI Images API: %s", exc)
+        metadata["error"] = str(exc)
+        return None, metadata
+
+
 def _translate_prompt(
     *,
     source: SourceConfig,
@@ -162,19 +260,36 @@ def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
         "You output strict JSON only.",
         _translate_prompt(source=source, title=title, description=description, tags=tags),
     )
+    translated_title = str(translated.get("translated_title") or "").strip()
+    translated_description = str(translated.get("translated_description") or "").strip()
+    translated_tags = [
+        str(item).strip()
+        for item in translated.get("translated_tags", [])
+        if str(item).strip()
+    ][:TAG_LIMIT]
+    localized_thumbnail_file, thumbnail_translation = translate_thumbnail(
+        session,
+        thumbnail_file,
+        source=source,
+        title=title,
+        translated_title=translated_title,
+        description=description,
+        translated_description=translated_description,
+        translated_tags=translated_tags,
+    )
+    publish_thumbnail_file = localized_thumbnail_file or thumbnail_file
     payload = {
         "title": title,
         "description": description,
         "tags": tags,
         "thumbnail_url": thumbnail_url,
-        "thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
-        "translated_title": str(translated.get("translated_title") or "").strip(),
-        "translated_description": str(translated.get("translated_description") or "").strip(),
-        "translated_tags": [
-            str(item).strip()
-            for item in translated.get("translated_tags", [])
-            if str(item).strip()
-        ][:TAG_LIMIT],
+        "source_thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
+        "thumbnail_file": str(publish_thumbnail_file) if publish_thumbnail_file else "",
+        "translated_thumbnail_file": str(localized_thumbnail_file) if localized_thumbnail_file else "",
+        "thumbnail_translation": thumbnail_translation,
+        "translated_title": translated_title,
+        "translated_description": translated_description,
+        "translated_tags": translated_tags,
         "model": settings["model"],
         "base_url": normalize_openai_base_url(settings["base_url"]),
     }

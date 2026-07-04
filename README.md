@@ -214,11 +214,20 @@ cp env.txt.example .env
 | `DEVICE` | 模型运行设备，例如 `auto`、`cuda`、`cuda:0`、`mps`、`mps:0` 或 `cpu`；`auto` 按 CUDA、MPS、CPU 顺序选择。 |
 | `DEMUCS_DEVICE` / `WHISPER_DEVICE` | 可选组件级设备覆盖；留空时使用 `DEVICE`。Whisper 选择 MPS 时会退回 CPU，因为词级时间戳对齐依赖 MPS 不支持的 float64 DTW。 |
 | `FFMPEG_VIDEO_ENCODER` | 最终视频编码器，默认 `auto`；检测到 `h264_nvenc` 时使用 GPU NVENC，否则回退 `libx264`。可设为 `libx264` 或 `h264_nvenc` 强制指定。 |
+| `BILIBILI_TID` | 自动发布到 Bilibili 时使用的分区 ID，默认 `21`。 |
+| `BILIBILI_COPYRIGHT` | Bilibili 投稿版权类型，默认 `2` 表示转载；`1` 表示自制。 |
+| `BILIBILI_UPLOAD_LINE` | Bilibili UPOS 上传线路，默认 `bda2`。 |
+| `BILIBILI_UPLOAD_THREADS` | Bilibili 分片上传并发数，默认 `3`。 |
+| `BILIBILI_SOURCE` | 转载投稿的来源说明；留空时不额外设置。 |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API 地址，例如 `https://api.openai.com/v1`。 |
 | `OPENAI_API_KEY` | 翻译阶段使用的 API key。 |
 | `OPENAI_MODEL` | 翻译阶段使用的 Chat Completions 模型。 |
-| `OPENAI_TRANSLATE_CONCURRENCY` | 翻译阶段的并发请求数，默认 `50`。 |
+| `OPENAI_TRANSLATE_CONCURRENCY` | 翻译阶段的并发批次数，默认 `5`。 |
+| `OPENAI_TRANSLATE_USE_BATCH` | 是否启用批量翻译，默认 `true`；设为 `false` 时每句一个请求。 |
+| `OPENAI_TRANSLATE_BATCH_SIZE` | 每个翻译请求包含的句子数，默认 `20`。 |
 | `OPENAI_TIMEOUT_SECONDS` | 单次 Chat Completions 请求超时秒数，默认 `60`。 |
+| `OPENAI_RETRY_BASE_SECONDS` | 翻译重试的指数退避初始等待秒数，默认 `1`。 |
+| `OPENAI_RETRY_MAX_SECONDS` | 翻译重试的指数退避最大等待秒数，默认 `30`。 |
 | `LOCAL_UPLOAD_MAX_BYTES` | 本地视频上传大小上限，默认 4 GiB。 |
 | `LOCAL_SUBTITLE_MAX_BYTES` | 可选本地 SRT 字幕上传大小上限，默认 20 MiB。 |
 | `YTDLP_PROXY_PORT` | yt-dlp 使用的本机代理端口，例如 `7890`。 |
@@ -308,7 +317,7 @@ YouTube / Bilibili URL
   -> Demucs 分离人声与背景音
   -> Whisper 识别语音并输出词级时间戳
   -> 句子与时间范围整理
-  -> OpenAI 兼容 API 预处理全文并逐句并发翻译
+  -> OpenAI 兼容 API 预处理全文并批量并发翻译
   -> 按句切分原始人声作为参考音频
   -> VoxCPM2 生成目标语言配音
   -> 对齐配音时长并与背景音混音

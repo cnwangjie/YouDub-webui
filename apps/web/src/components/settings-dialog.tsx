@@ -11,6 +11,8 @@ import {
   saveCookie,
   saveOpenAISettings,
   saveYtdlpSettings,
+  syncSettingsFromEnv,
+  testOpenAIConnection,
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
@@ -40,20 +42,22 @@ type SettingsForm = {
   apiKey: string
   model: string
   translateConcurrency: string
+  translateUseBatch: boolean
   proxyPort: string
 }
 
 const SAVED_API_KEY_MASK = "********"
 const SAVED_COOKIE_SENTINEL = "__YOUDUB_SAVED_COOKIE__"
 
-type MessageKey = "keySaved" | "saved"
+type MessageKey = "keySaved" | "saved" | "envSynced" | "openaiTested"
 
 const defaultSettings: SettingsForm = {
   cookie: "",
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
-  translateConcurrency: "50",
+  translateConcurrency: "5",
+  translateUseBatch: true,
   proxyPort: "",
 }
 
@@ -70,6 +74,8 @@ export function SettingsDialog() {
   const [modelOptions, setModelOptions] = useState<string[]>([])
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
+  const [testingOpenAI, setTestingOpenAI] = useState(false)
+  const [syncingEnv, setSyncingEnv] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [cookieDirty, setCookieDirty] = useState(false)
   const [apiKeyDirty, setApiKeyDirty] = useState(false)
@@ -77,7 +83,15 @@ export function SettingsDialog() {
   const cookieValue =
     settings.cookie === SAVED_COOKIE_SENTINEL ? t.settings.savedCookie : settings.cookie
   const visibleMessage =
-    messageKey === "keySaved" ? t.settings.keySaved : messageKey === "saved" ? t.settings.saved : message
+    messageKey === "keySaved"
+      ? t.settings.keySaved
+      : messageKey === "saved"
+        ? t.settings.saved
+        : messageKey === "envSynced"
+          ? t.settings.envSynced
+          : messageKey === "openaiTested"
+            ? t.settings.openaiTested
+            : message
 
   useEffect(() => {
     if (!open) return
@@ -88,7 +102,8 @@ export function SettingsDialog() {
           baseUrl: openai.base_url,
           apiKey: openai.has_api_key ? openai.api_key || SAVED_API_KEY_MASK : "",
           model: openai.model,
-          translateConcurrency: openai.translate_concurrency || "50",
+          translateConcurrency: openai.translate_concurrency || "5",
+          translateUseBatch: openai.translate_use_batch,
           proxyPort: ytdlp.proxy_port,
         })
         setModelOptions(uniqueModels([openai.model]))
@@ -118,6 +133,7 @@ export function SettingsDialog() {
         clear_api_key: clearApiKey,
         model: settings.model,
         translate_concurrency: settings.translateConcurrency,
+        translate_use_batch: settings.translateUseBatch,
       })
       const ytdlp = await saveYtdlpSettings({ proxy_port: settings.proxyPort })
       setMessageKey("saved")
@@ -126,6 +142,7 @@ export function SettingsDialog() {
         apiKey: openai.has_api_key ? openai.api_key || SAVED_API_KEY_MASK : "",
         cookie: cookieDirty ? (cookie?.exists ? SAVED_COOKIE_SENTINEL : "") : current.cookie,
         translateConcurrency: openai.translate_concurrency || current.translateConcurrency,
+        translateUseBatch: openai.translate_use_batch,
         proxyPort: ytdlp.proxy_port,
       }))
       setCookieDirty(false)
@@ -155,6 +172,53 @@ export function SettingsDialog() {
       setMessage(err instanceof Error ? err.message : t.settings.loadModelsError)
     } finally {
       setModelsLoading(false)
+    }
+  }
+
+  async function testOpenAI() {
+    setMessage("")
+    setMessageKey(null)
+    setTestingOpenAI(true)
+    try {
+      await testOpenAIConnection({
+        base_url: settings.baseUrl,
+        api_key: apiKeyDirty ? settings.apiKey : "",
+        model: settings.model,
+      })
+      setMessageKey("openaiTested")
+    } catch (err) {
+      setMessageKey(null)
+      setMessage(err instanceof Error ? err.message : t.settings.openaiTestError)
+    } finally {
+      setTestingOpenAI(false)
+    }
+  }
+
+  async function syncEnv() {
+    setMessage("")
+    setMessageKey(null)
+    setSyncingEnv(true)
+    try {
+      const synced = await syncSettingsFromEnv()
+      setSettings((current) => ({
+        ...current,
+        baseUrl: synced.openai.base_url,
+        apiKey: synced.openai.has_api_key ? synced.openai.api_key || SAVED_API_KEY_MASK : "",
+        model: synced.openai.model,
+        translateConcurrency: synced.openai.translate_concurrency || "5",
+        translateUseBatch: synced.openai.translate_use_batch,
+        proxyPort: synced.ytdlp.proxy_port,
+      }))
+      setModelOptions(uniqueModels([synced.openai.model]))
+      setModelsLoaded(false)
+      setShowApiKey(false)
+      setApiKeyDirty(false)
+      setMessageKey("envSynced")
+    } catch (err) {
+      setMessageKey(null)
+      setMessage(err instanceof Error ? err.message : t.settings.syncEnvError)
+    } finally {
+      setSyncingEnv(false)
     }
   }
 
@@ -313,6 +377,15 @@ export function SettingsDialog() {
                     <RefreshCw className="size-4" />
                     {modelsLoading ? t.settings.loading : t.settings.getModels}
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={testOpenAI}
+                    disabled={testingOpenAI || !settings.baseUrl.trim() || !settings.model.trim()}
+                  >
+                    <RefreshCw className={testingOpenAI ? "size-4 animate-spin" : "size-4"} />
+                    {testingOpenAI ? t.settings.testingOpenAI : t.settings.testOpenAI}
+                  </Button>
                 </div>
               </div>
               <div className="grid gap-2">
@@ -327,16 +400,37 @@ export function SettingsDialog() {
                       translateConcurrency: event.target.value.replace(/[^0-9]/g, ""),
                     }))
                   }
-                  placeholder="50"
+                  placeholder="5"
                 />
                 <p className="text-xs text-muted-foreground">
                   {t.settings.concurrencyHelp}
                 </p>
               </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border-input accent-[#00aeec]"
+                  checked={settings.translateUseBatch}
+                  onChange={(event) =>
+                    setSettings((current) => ({
+                      ...current,
+                      translateUseBatch: event.target.checked,
+                    }))
+                  }
+                />
+                <span>{t.settings.translateUseBatch}</span>
+              </label>
+              <p className="-mt-2 text-xs text-muted-foreground">
+                {t.settings.translateUseBatchHelp}
+              </p>
               {visibleMessage ? <p className="text-sm text-muted-foreground">{visibleMessage}</p> : null}
             </div>
           </div>
-          <DialogFooter className="shrink-0">
+          <DialogFooter className="shrink-0 sm:justify-between">
+            <Button type="button" variant="outline" onClick={syncEnv} disabled={syncingEnv}>
+              <RefreshCw className={syncingEnv ? "size-4 animate-spin" : "size-4"} />
+              {syncingEnv ? t.settings.syncingEnv : t.settings.syncEnv}
+            </Button>
             <Button type="submit">{t.settings.save}</Button>
           </DialogFooter>
         </form>

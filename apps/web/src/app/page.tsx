@@ -88,6 +88,7 @@ export default function Home() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
+  const [autoStart, setAutoStart] = useState(true)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [taskPage, setTaskPage] = useState(1)
@@ -116,6 +117,7 @@ export default function Home() {
     { value: "paused", label: statusLabel("paused") },
     { value: "succeeded", label: statusLabel("succeeded") },
     { value: "failed", label: statusLabel("failed") },
+    { value: "cancelled", label: statusLabel("cancelled") },
   ]
 
   const modeOptions: { value: TaskListExecutionMode; label: string }[] = [
@@ -209,8 +211,8 @@ export default function Home() {
     setSubmitting(true)
     try {
       const created = localFile
-        ? await uploadLocalTask(localFile, localDirection, localSubtitleFile, executionMode)
-        : await createTask(submittedUrl, executionMode)
+        ? await uploadLocalTask(localFile, localDirection, localSubtitleFile, executionMode, autoStart)
+        : await createTask(submittedUrl, executionMode, autoStart)
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
@@ -339,6 +341,15 @@ export default function Home() {
                   </SelectContent>
                 </Select>
               </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border-input accent-[#00aeec]"
+                  checked={autoStart}
+                  onChange={(event) => setAutoStart(event.target.checked)}
+                />
+                <span>{t.home.autoStartLabel}</span>
+              </label>
               <div className="flex items-center justify-between gap-3">
                 {queued > 0 ? (
                   <p className="text-xs text-muted-foreground">

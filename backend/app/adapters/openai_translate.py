@@ -8,6 +8,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock, Thread
+from time import sleep
 from typing import Any, Callable
 
 import httpx
@@ -24,8 +25,11 @@ API_SETTING_KEYS = ("base_url", "api_key", "model")
 PREPROCESS_RETRY = 2
 TRANSLATE_RETRY = 2
 DESCRIPTION_LIMIT = 500
-DEFAULT_CONCURRENCY = 50
+DEFAULT_CONCURRENCY = 5
+DEFAULT_TRANSLATE_BATCH_SIZE = 20
 DEFAULT_OPENAI_TIMEOUT_SECONDS = 60.0
+DEFAULT_RETRY_BASE_SECONDS = 1.0
+DEFAULT_RETRY_MAX_SECONDS = 30.0
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[[str], None]
 
@@ -50,6 +54,15 @@ class TranslationItem(BaseModel):
     dst: str
 
 
+class TranslationBatchItem(BaseModel):
+    index: int
+    dst: str
+
+
+class TranslationBatchResponse(BaseModel):
+    items: list[TranslationBatchItem] = Field(default_factory=list)
+
+
 def list_models(*, base_url: str, api_key: str) -> list[str]:
     if not api_key:
         raise ValueError("OpenAI API key is not configured.")
@@ -69,6 +82,26 @@ def list_models(*, base_url: str, api_key: str) -> list[str]:
             seen.add(model_id)
             models.append(model_id)
     return models
+
+
+def test_connection(*, base_url: str, api_key: str, model: str) -> dict[str, str]:
+    if not model.strip():
+        raise ValueError("OpenAI model is not configured.")
+    client = _client(base_url, api_key)
+    response = client.chat.completions.create(
+        model=model.strip(),
+        messages=[
+            {"role": "system", "content": "Reply with strict JSON only."},
+            {"role": "user", "content": '{"ping":"ok"}'},
+        ],
+        temperature=0,
+        max_tokens=16,
+    )
+    content = response.choices[0].message.content or ""
+    return {
+        "model": model.strip(),
+        "message": content.strip(),
+    }
 
 
 def _client(base_url: str, api_key: str) -> OpenAI:
@@ -117,6 +150,64 @@ def _call_timeout() -> float:
         log.warning("Invalid OPENAI_TIMEOUT_SECONDS=%r, using %.1fs", raw, DEFAULT_OPENAI_TIMEOUT_SECONDS)
         return DEFAULT_OPENAI_TIMEOUT_SECONDS
     return timeout
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r, using %.1f", name, raw, default)
+        return default
+    if value < 0:
+        log.warning("Invalid %s=%r, using %.1f", name, raw, default)
+        return default
+    return value
+
+
+def _retry_delay(attempt_index: int) -> float:
+    base = _float_env("OPENAI_RETRY_BASE_SECONDS", DEFAULT_RETRY_BASE_SECONDS)
+    cap = _float_env("OPENAI_RETRY_MAX_SECONDS", DEFAULT_RETRY_MAX_SECONDS)
+    return min(cap, base * (2 ** max(0, attempt_index)))
+
+
+def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    if not raw.isdigit():
+        log.warning("Invalid %s=%r, using %d", name, raw, default)
+        return default
+    value = int(raw)
+    if value < minimum or value > maximum:
+        log.warning("Invalid %s=%r, using %d", name, raw, default)
+        return default
+    return value
+
+
+def _translate_batch_size() -> int:
+    return _int_env("OPENAI_TRANSLATE_BATCH_SIZE", DEFAULT_TRANSLATE_BATCH_SIZE, 1, 100)
+
+
+def _sleep_before_retry(
+    *,
+    attempt_index: int,
+    total_attempts: int,
+    log_callback: LogCallback | None,
+    label: str,
+    error: Exception,
+) -> None:
+    if attempt_index >= total_attempts - 1:
+        return
+    delay = _retry_delay(attempt_index)
+    if log_callback:
+        log_callback(
+            f"{label} attempt {attempt_index + 1}/{total_attempts} failed: {error}; "
+            f"retrying in {delay:g}s"
+        )
+    sleep(delay)
 
 
 def _call_json(
@@ -227,10 +318,11 @@ def preprocess(
         )
     client = _client(base_url, api_key)
     last_error: Exception | None = None
-    for attempt in range(PREPROCESS_RETRY + 1):
+    total_attempts = PREPROCESS_RETRY + 1
+    for attempt in range(total_attempts):
         try:
             if log_callback:
-                log_callback(f"Preprocess request attempt {attempt + 1}/{PREPROCESS_RETRY + 1}")
+                log_callback(f"Preprocess request attempt {attempt + 1}/{total_attempts}")
             if log_callback:
                 data = _call_json(
                     client,
@@ -250,14 +342,37 @@ def preprocess(
             log.warning("preprocess attempt %d failed: %s", attempt + 1, exc)
             if log_callback:
                 log_callback(f"Preprocess response validation failed on attempt {attempt + 1}: {exc}")
+            _sleep_before_retry(
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+                log_callback=log_callback,
+                label="Preprocess request",
+                error=exc,
+            )
         except TimeoutError as exc:
+            last_error = exc
             if log_callback:
                 log_callback(f"Preprocess request timed out on attempt {attempt + 1}: {exc}")
-            raise
+            _sleep_before_retry(
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+                log_callback=log_callback,
+                label="Preprocess request",
+                error=exc,
+            )
         except Exception as exc:
+            last_error = exc
             if log_callback:
                 log_callback(f"Preprocess request failed on attempt {attempt + 1}: {exc}")
-            raise
+            _sleep_before_retry(
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+                log_callback=log_callback,
+                label="Preprocess request",
+                error=exc,
+            )
+    if last_error and not isinstance(last_error, (json.JSONDecodeError, ValidationError)):
+        raise RuntimeError(f"preprocess failed after {total_attempts} attempts: {last_error}") from last_error
     log.error("preprocess gave up, returning empty: %s", last_error)
     if log_callback:
         log_callback("Preprocess gave up after invalid responses; continuing with empty preprocess data")
@@ -287,19 +402,120 @@ def translate_sentence(
     client: OpenAI,
     model: str,
     system: str,
+    log_callback: LogCallback | None = None,
+    sentence_index: int | None = None,
+    sentence_total: int | None = None,
 ) -> str:
     last_error: Exception | None = None
-    for attempt in range(TRANSLATE_RETRY):
+    total_attempts = TRANSLATE_RETRY + 1
+    if sentence_index is not None and sentence_total is not None:
+        label = f"Translation request for sentence {sentence_index + 1}/{sentence_total}"
+    else:
+        label = "Translation request"
+    for attempt in range(total_attempts):
         try:
             data = _call_json(client, model, system, text)
             item = TranslationItem.model_validate(data)
             if not item.dst.strip():
                 raise ValueError("empty dst")
             return _post_process(item.dst, target_language)
-        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+        except Exception as exc:
             last_error = exc
             log.warning("translate attempt %d failed for %r: %s", attempt + 1, text[:60], exc)
-    raise RuntimeError(f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}")
+            _sleep_before_retry(
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+                log_callback=log_callback,
+                label=label,
+                error=exc,
+            )
+    raise RuntimeError(f"translate_sentence failed after {total_attempts} attempts: {last_error}")
+
+
+def _batch_user_prompt(items: list[tuple[int, str]]) -> str:
+    return (
+        "Translate each item independently. Return strict JSON only with this shape:\n"
+        '{"items":[{"index":0,"dst":"translated text"}]}\n'
+        "Use the same index values from the input. Do not omit, merge, split, or reorder items.\n"
+        "Input:\n"
+        + json.dumps(
+            {"items": [{"index": index, "src": text} for index, text in items]},
+            ensure_ascii=False,
+        )
+    )
+
+
+def _translate_batch_once(
+    items: list[tuple[int, str]],
+    target_language: str,
+    client: OpenAI,
+    model: str,
+    system: str,
+) -> dict[int, str]:
+    data = _call_json(client, model, system, _batch_user_prompt(items))
+    response = TranslationBatchResponse.model_validate(data)
+    expected = {index for index, _ in items}
+    result: dict[int, str] = {}
+    for item in response.items:
+        if item.index not in expected:
+            continue
+        if not item.dst.strip():
+            raise ValueError(f"empty dst for index {item.index}")
+        result[item.index] = _post_process(item.dst, target_language)
+    missing = expected - set(result)
+    if missing:
+        raise ValueError(f"missing translations for indexes: {sorted(missing)}")
+    return result
+
+
+def translate_sentence_batch(
+    items: list[tuple[int, str]],
+    target_language: str,
+    client: OpenAI,
+    model: str,
+    system: str,
+    log_callback: LogCallback | None = None,
+) -> dict[int, str]:
+    if not items:
+        return {}
+    if len(items) == 1:
+        index, text = items[0]
+        return {
+            index: translate_sentence(
+                text,
+                target_language,
+                client,
+                model,
+                system,
+                log_callback,
+                index,
+                index + 1,
+            )
+        }
+
+    total_attempts = TRANSLATE_RETRY + 1
+    last_error: Exception | None = None
+    label = f"Translation batch {items[0][0] + 1}-{items[-1][0] + 1} ({len(items)} sentences)"
+    for attempt in range(total_attempts):
+        try:
+            return _translate_batch_once(items, target_language, client, model, system)
+        except Exception as exc:
+            last_error = exc
+            log.warning("%s attempt %d failed: %s", label, attempt + 1, exc)
+            _sleep_before_retry(
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+                log_callback=log_callback,
+                label=label,
+                error=exc,
+            )
+
+    if log_callback:
+        log_callback(f"{label} failed after {total_attempts} attempts: {last_error}; splitting batch")
+    midpoint = len(items) // 2
+    left = translate_sentence_batch(items[:midpoint], target_language, client, model, system, log_callback)
+    right = translate_sentence_batch(items[midpoint:], target_language, client, model, system, log_callback)
+    return {**left, **right}
 
 
 def translate_batch(
@@ -312,6 +528,7 @@ def translate_batch(
     api_key: str,
     model: str,
     concurrency: int = DEFAULT_CONCURRENCY,
+    use_batch: bool = True,
     cached_translations: dict[int, str] | None = None,
     cache_callback: Callable[[int, str], None] | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -347,33 +564,83 @@ def translate_batch(
         if log_callback:
             log_callback("All sentences already available from partial cache")
         return [value or "" for value in results]
-    if log_callback:
-        log_callback(f"Submitting {len(pending)} translation requests")
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        futures = {
-            pool.submit(
-                translate_sentence,
-                texts[index],
-                source.target_language,
-                client,
-                model,
-                system,
-            ): index
-            for index in pending
-        }
-        for future in as_completed(futures):
-            index = futures[future]
-            if log_callback:
-                log_callback(f"Translation request completed for sentence {index + 1}/{len(texts)}")
-            dst = future.result()
-            results[index] = dst
-            done += 1
-            if cache_callback:
-                cache_callback(index, dst)
+    if use_batch:
+        if log_callback:
+            log_callback(f"Submitting {len(pending)} pending sentences in batches")
+        batch_size = _translate_batch_size()
+        batches = [
+            [(index, texts[index]) for index in pending[start : start + batch_size]]
+            for start in range(0, len(pending), batch_size)
+        ]
+        if log_callback:
+            log_callback(
+                f"Translation batch mode enabled: batch size={batch_size}, "
+                f"batches={len(batches)}, parallel workers={max(1, concurrency)}"
+            )
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+            futures = {
+                pool.submit(
+                    translate_sentence_batch,
+                    batch,
+                    source.target_language,
+                    client,
+                    model,
+                    system,
+                    log_callback,
+                ): batch
+                for batch in batches
+            }
+            for future in as_completed(futures):
+                batch = futures[future]
                 if log_callback:
-                    log_callback(f"Cached sentence {index + 1}/{len(texts)} to partial translation file")
-            if progress_callback:
-                progress_callback(done, len(texts), f"Translated {done}/{len(texts)} sentences")
+                    log_callback(
+                        f"Translation batch completed for sentences "
+                        f"{batch[0][0] + 1}-{batch[-1][0] + 1}/{len(texts)}"
+                    )
+                translated = future.result()
+                for index, dst in sorted(translated.items()):
+                    results[index] = dst
+                    done += 1
+                    if cache_callback:
+                        cache_callback(index, dst)
+                        if log_callback:
+                            log_callback(f"Cached sentence {index + 1}/{len(texts)} to partial translation file")
+                if progress_callback:
+                    progress_callback(done, len(texts), f"Translated {done}/{len(texts)} sentences")
+    else:
+        if log_callback:
+            log_callback(
+                f"Translation batch mode disabled: submitting {len(pending)} sentence requests, "
+                f"parallel workers={max(1, concurrency)}"
+            )
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+            futures = {
+                pool.submit(
+                    translate_sentence,
+                    texts[index],
+                    source.target_language,
+                    client,
+                    model,
+                    system,
+                    log_callback,
+                    index,
+                    len(texts),
+                ): index
+                for index in pending
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                if log_callback:
+                    log_callback(f"Translation request completed for sentence {index + 1}/{len(texts)}")
+                dst = future.result()
+                results[index] = dst
+                done += 1
+                if cache_callback:
+                    cache_callback(index, dst)
+                    if log_callback:
+                        log_callback(f"Cached sentence {index + 1}/{len(texts)} to partial translation file")
+                if progress_callback:
+                    progress_callback(done, len(texts), f"Translated {done}/{len(texts)} sentences")
     if log_callback:
         log_callback("Translation batch completed")
     return [value or "" for value in results]
@@ -467,6 +734,15 @@ def _concurrency_from(settings: dict[str, str]) -> int:
     return concurrency
 
 
+def _use_batch_from(settings: dict[str, str]) -> bool:
+    return str(settings.get("translate_use_batch", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def translate_asr(
     asr_file: Path,
     session: Path,
@@ -540,6 +816,7 @@ def translate_asr(
         pre,
         **api,
         concurrency=_concurrency_from(settings),
+        use_batch=_use_batch_from(settings),
         cached_translations=cached_translations,
         cache_callback=cache_translation,
         progress_callback=progress_callback,

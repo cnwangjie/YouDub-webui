@@ -7,7 +7,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable
 
-from . import database
+from . import cancellation, database
 from .config import WORKFOLDER
 from .devices import device_plan_summary
 from .runtime_checks import validate_runtime_device
@@ -79,6 +79,8 @@ class PipelineRunner:
         status = task["status"]
         if status not in ("queued", "paused"):
             return
+        cancellation.clear_cancel(self.task_id)
+        self._raise_if_cancelled()
 
         if status == "queued":
             updates: dict[str, str] = {"status": "running"}
@@ -94,6 +96,7 @@ class PipelineRunner:
             validate_runtime_device()
             self.log(f"Device plan: {device_plan_summary()}")
             for stage in STAGES:
+                self._raise_if_cancelled()
                 if self._stage_status(stage.name) == "succeeded":
                     database.update_task(self.task_id, current_stage=stage.name)
                     database.update_stage(self.task_id, stage.name, progress=100)
@@ -101,6 +104,7 @@ class PipelineRunner:
                     self.log(f"[{stage.name}] Reused cached output")
                     continue
                 self._run_stage(stage.name)
+                self._raise_if_cancelled()
                 if execution_mode == "manual":
                     database.update_task(self.task_id, status="paused")
                     self.log(f"Paused after [{stage.name}], waiting for manual continue")
@@ -113,6 +117,9 @@ class PipelineRunner:
                 completed_at=database.now_iso(),
             )
             self.log("Task succeeded")
+        except cancellation.TaskCancelled as exc:
+            database.cancel_task(self.task_id, str(exc))
+            self.log(str(exc))
         except Exception as exc:
             current = database.get_task(self.task_id)
             failed_stage = current["current_stage"] if current else None
@@ -133,6 +140,8 @@ class PipelineRunner:
             )
             self.log("Task failed")
             self.log(traceback.format_exc())
+        finally:
+            cancellation.clear_cancel(self.task_id)
 
     def log(self, message: str) -> None:
         _write_log(self.task_id, message)
@@ -142,6 +151,7 @@ class PipelineRunner:
         self.log(f"[{stage}] {message}")
 
     def stage_progress(self, stage: str, progress: int, message: str, *, force: bool = False) -> None:
+        self._raise_if_cancelled()
         bounded = max(0, min(100, int(progress)))
         now = monotonic()
         previous = self._progress_state.get(stage)
@@ -153,6 +163,12 @@ class PipelineRunner:
                 return
         database.update_stage(self.task_id, stage, progress=bounded, last_message=message)
         self._progress_state[stage] = (bounded, now)
+
+    def _raise_if_cancelled(self) -> None:
+        task = database.get_task(self.task_id)
+        if task and task["status"] == "cancelled":
+            raise cancellation.TaskCancelled("Task cancelled by user.")
+        cancellation.raise_if_cancelled(self.task_id)
 
     def _stage_status(self, stage: str) -> str | None:
         task = database.get_task(self.task_id)
@@ -192,6 +208,7 @@ class PipelineRunner:
         return write_uploaded_subtitle_artifacts(subtitle_file, session, source)
 
     def _run_stage(self, stage: str) -> None:
+        self._raise_if_cancelled()
         self._progress_state.pop(stage, None)
         database.update_task(self.task_id, current_stage=stage)
         database.update_stage(
@@ -205,6 +222,7 @@ class PipelineRunner:
         )
         self.stage_message(stage, "Started")
         self._stage_handlers[stage](database.get_task(self.task_id))
+        self._raise_if_cancelled()
         database.update_stage(
             self.task_id,
             stage,
