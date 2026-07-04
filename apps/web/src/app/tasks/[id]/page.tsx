@@ -2,8 +2,9 @@
 
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { use, useEffect, useMemo, useState } from "react"
+import { use, useEffect, useMemo, useRef, useState } from "react"
 import {
+  ArrowDownToLine,
   CheckCircle2,
   Circle,
   Download,
@@ -59,7 +60,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { Progress } from "@/components/ui/progress"
-import { ScrollArea } from "@/components/ui/scroll-area"
 
 function stageIcon(status: StageStatus) {
   if (status === "succeeded") return <CheckCircle2 className="size-5 text-[#00aeec]" />
@@ -87,6 +87,18 @@ function durationOf(start: string | null, end: string | null) {
   return `${minutes}m${rem.toString().padStart(2, "0")}s`
 }
 
+function formatVideoDuration(value: number | null) {
+  if (!value || value <= 0) return ""
+  const seconds = Math.round(value)
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const rem = seconds % 60
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${rem.toString().padStart(2, "0")}`
+  }
+  return `${minutes}:${rem.toString().padStart(2, "0")}`
+}
+
 function normalizeProgress(value: number | null | undefined) {
   if (typeof value !== "number") return null
   return Math.max(0, Math.min(100, Math.round(value)))
@@ -96,8 +108,10 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const { id } = use(params)
   const router = useRouter()
   const { stageLabel, statusLabel, t } = useI18n()
+  const logRef = useRef<HTMLDivElement | null>(null)
   const [task, setTask] = useState<Task | null>(null)
   const [log, setLog] = useState("")
+  const [followLog, setFollowLog] = useState(true)
   const [error, setError] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -220,6 +234,12 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     }
   }
 
+  const scrollLogToBottom = (behavior: ScrollBehavior = "smooth") => {
+    const element = logRef.current
+    if (!element) return
+    element.scrollTo({ top: element.scrollHeight, behavior })
+  }
+
   const isRunning = task?.status === "running"
   const isQueued = task?.status === "queued"
   const isFailed = task?.status === "failed"
@@ -259,6 +279,11 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       window.clearInterval(interval)
     }
   }, [id, t.task.loadError])
+
+  useEffect(() => {
+    if (!followLog) return
+    window.requestAnimationFrame(() => scrollLogToBottom("auto"))
+  }, [followLog, log])
 
   const progress = useMemo(() => {
     if (!task?.stages?.length) return 0
@@ -311,6 +336,12 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 <dd className="font-mono text-xs">{task.id}</dd>
                 <dt className="text-muted-foreground">{t.task.created}</dt>
                 <dd>{formatTime(task.created_at)}</dd>
+                {task.duration_seconds ? (
+                  <>
+                    <dt className="text-muted-foreground">{t.task.duration}</dt>
+                    <dd>{formatVideoDuration(task.duration_seconds)}</dd>
+                  </>
+                ) : null}
                 <dt className="text-muted-foreground">{t.task.started}</dt>
                 <dd>{formatTime(task.started_at)}</dd>
                 <dt className="text-muted-foreground">{t.task.completed}</dt>
@@ -583,18 +614,36 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
             <CardTitle>{t.task.runLog}</CardTitle>
-            <FileText className="size-4 text-muted-foreground" />
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border-input accent-[#00aeec]"
+                  checked={followLog}
+                  onChange={(event) => setFollowLog(event.target.checked)}
+                />
+                <span>{t.task.followLog}</span>
+              </label>
+              <Button type="button" variant="outline" size="sm" onClick={() => scrollLogToBottom()}>
+                <ArrowDownToLine className="size-4" />
+                {t.task.scrollLogBottom}
+              </Button>
+              <FileText className="size-4 text-muted-foreground" />
+            </div>
           </CardHeader>
           <CardContent>
-            <ScrollArea className="h-80 rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-100">
+            <div
+              ref={logRef}
+              className="h-80 overflow-y-auto rounded-lg border bg-zinc-950 p-3 text-xs text-zinc-100 [scrollbar-gutter:stable]"
+            >
               {log ? (
                 <pre className="whitespace-pre-wrap break-words font-mono">{log}</pre>
               ) : (
                 <p className="text-zinc-400">{t.task.emptyLog}</p>
               )}
-            </ScrollArea>
+            </div>
           </CardContent>
         </Card>
 

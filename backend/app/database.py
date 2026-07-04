@@ -42,6 +42,7 @@ def init_db() -> None:
               current_stage TEXT,
               session_path TEXT,
               final_video_path TEXT,
+              duration_seconds INTEGER,
               error_message TEXT,
               created_at TEXT NOT NULL,
               started_at TEXT,
@@ -88,26 +89,57 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'auto'"
             )
+        if "duration_seconds" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN duration_seconds INTEGER")
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
             conn.execute("ALTER TABLE task_stages ADD COLUMN progress INTEGER")
+
+
+def _duration_seconds(value: Any) -> int | None:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return round(duration)
 
 
 def backfill_titles_from_metadata() -> None:
     import json
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, session_path FROM tasks WHERE (title IS NULL OR title = '') AND session_path IS NOT NULL"
+            """
+            SELECT id, session_path, title, duration_seconds
+            FROM tasks
+            WHERE session_path IS NOT NULL
+              AND ((title IS NULL OR title = '') OR duration_seconds IS NULL)
+            """
         ).fetchall()
     for row in rows:
-        info_path = Path(row["session_path"]) / "metadata" / "ytdlp_info.json"
+        session = Path(row["session_path"])
+        info_path = session / "metadata" / "ytdlp_info.json"
+        if not info_path.exists():
+            info_path = session / "metadata" / "local_info.json"
         if not info_path.exists():
             continue
-        title = (json.loads(info_path.read_text(encoding="utf-8")).get("title") or "").strip()
-        if not title:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        title = (info.get("title") or "").strip()
+        duration = _duration_seconds(info.get("duration"))
+        updates: dict[str, Any] = {}
+        if title and not (row["title"] or "").strip():
+            updates["title"] = title
+        if duration is not None and row["duration_seconds"] is None:
+            updates["duration_seconds"] = duration
+        if not updates:
             continue
         with connect() as conn:
-            conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (title, row["id"]))
+            assignments = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(
+                f"UPDATE tasks SET {assignments} WHERE id = ?",
+                [*updates.values(), row["id"]],
+            )
 
 
 def fail_stale_active_tasks() -> None:
@@ -200,7 +232,7 @@ def latest_task_id() -> str | None:
 
 
 TASK_SUMMARY_COLUMNS = (
-    "id, url, title, status, current_stage, final_video_path, error_message, "
+    "id, url, title, status, current_stage, final_video_path, duration_seconds, error_message, "
     "created_at, started_at, completed_at, execution_mode"
 )
 
@@ -254,6 +286,7 @@ def list_tasks_page(
     status: str = "all",
     execution_mode: str = "all",
     sort: str = "created_desc",
+    hide_completed: bool = False,
 ) -> dict[str, Any]:
     page = max(page, 1)
     page_size = max(page_size, 1)
@@ -273,6 +306,8 @@ def list_tasks_page(
     if status != "all":
         where_parts.append("status = ?")
         params.append(status)
+    elif hide_completed:
+        where_parts.append("status != 'succeeded'")
     if execution_mode != "all":
         where_parts.append("execution_mode = ?")
         params.append(execution_mode)
@@ -367,6 +402,18 @@ def queue_task_for_continue(task_id: str) -> None:
             """,
             (task_id,),
         )
+
+
+def list_requeueable_task_ids() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id FROM tasks
+            WHERE status IN ('paused', 'cancelled')
+            ORDER BY created_at ASC, rowid ASC
+            """
+        ).fetchall()
+    return [row["id"] for row in rows]
 
 
 def cancel_task(task_id: str, message: str = "Task cancelled by user.") -> None:

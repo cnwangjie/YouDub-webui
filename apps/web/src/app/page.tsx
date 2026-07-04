@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react"
-import { ChevronLeft, ChevronRight, Play, Search, Upload } from "lucide-react"
+import { ChevronLeft, ChevronRight, Pause, Play, Search, Upload } from "lucide-react"
 
 import {
   ExecutionMode,
@@ -13,8 +13,13 @@ import {
   TaskListSort,
   TaskListStatus,
   TaskSummary,
+  WorkerStatus,
   createTask,
+  getWorkerStatus,
   listTasks,
+  requeueAllTasks,
+  startWorker,
+  stopWorker,
   uploadLocalTask,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
@@ -96,9 +101,12 @@ export default function Home() {
   const [taskQuery, setTaskQuery] = useState("")
   const [taskStatus, setTaskStatus] = useState<TaskListStatus>("all")
   const [taskExecutionMode, setTaskExecutionMode] = useState<TaskListExecutionMode>("all")
-  const [taskSort, setTaskSort] = useState<TaskListSort>("created_desc")
+  const [taskSort, setTaskSort] = useState<TaskListSort>("created_asc")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [requeueingAll, setRequeueingAll] = useState(false)
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null)
+  const [togglingWorker, setTogglingWorker] = useState(false)
 
   const localDirectionOptions: { value: LocalDirection; label: string }[] = [
     { value: "en-zh", label: t.home.localEnZh },
@@ -150,16 +158,22 @@ export default function Home() {
     setTasks(result.tasks)
   }
 
+  async function refreshWorkerStatus() {
+    setWorkerStatus(await getWorkerStatus())
+  }
+
   async function refreshTasks() {
     const result = await listTasks({
       page: taskPage,
       page_size: taskPageSize,
       q: taskQuery,
-      status: taskStatus,
-      execution_mode: taskExecutionMode,
-      sort: taskSort,
-    })
+        status: taskStatus,
+        execution_mode: taskExecutionMode,
+        sort: taskSort,
+        hide_completed: taskStatus === "all",
+      })
     applyTaskList(result)
+    refreshWorkerStatus().catch(() => undefined)
   }
 
   useEffect(() => {
@@ -167,15 +181,20 @@ export default function Home() {
 
     const loadTasks = async () => {
       try {
-        const result = await listTasks({
-          page: taskPage,
-          page_size: taskPageSize,
-          q: taskQuery,
-          status: taskStatus,
-          execution_mode: taskExecutionMode,
-          sort: taskSort,
-        })
+        const [result, nextWorkerStatus] = await Promise.all([
+          listTasks({
+            page: taskPage,
+            page_size: taskPageSize,
+            q: taskQuery,
+            status: taskStatus,
+            execution_mode: taskExecutionMode,
+            sort: taskSort,
+            hide_completed: taskStatus === "all",
+          }),
+          getWorkerStatus(),
+        ])
         if (!cancelled) applyTaskList(result)
+        if (!cancelled) setWorkerStatus(nextWorkerStatus)
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : t.home.loadError)
       }
@@ -229,6 +248,33 @@ export default function Home() {
       setError(err instanceof Error ? err.message : t.home.createError)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function queueAllTasks() {
+    setError("")
+    setRequeueingAll(true)
+    try {
+      const result = await requeueAllTasks()
+      await refreshTasks()
+      setError(result.queued ? "" : t.home.queueAllEmpty)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.home.queueAllError)
+    } finally {
+      setRequeueingAll(false)
+    }
+  }
+
+  async function toggleWorker() {
+    setError("")
+    setTogglingWorker(true)
+    try {
+      const next = workerStatus?.running ? await stopWorker() : await startWorker()
+      setWorkerStatus(next)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.home.workerToggleError)
+    } finally {
+      setTogglingWorker(false)
     }
   }
 
@@ -374,8 +420,23 @@ export default function Home() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>{t.home.taskHistory} ({taskTotal})</CardTitle>
+          <CardHeader className="gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle>{t.home.taskHistory} ({taskTotal})</CardTitle>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={workerStatus?.running ? "secondary" : "outline"}>
+                  {workerStatus?.running ? t.home.workerRunning : t.home.workerStopped}
+                </Badge>
+                <Button variant="outline" onClick={toggleWorker} disabled={togglingWorker}>
+                  {workerStatus?.running ? <Pause className="size-4" /> : <Play className="size-4" />}
+                  {workerStatus?.running ? t.home.stopWorker : t.home.startWorker}
+                </Button>
+                <Button variant="outline" onClick={queueAllTasks} disabled={requeueingAll}>
+                  <Play className="size-4" />
+                  {requeueingAll ? t.home.queueingAll : t.home.queueAll}
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="px-0">
             <div className="border-b border-border/60 px-4 pb-4">

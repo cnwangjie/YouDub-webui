@@ -32,6 +32,7 @@ export type Task = {
   current_stage: string | null
   session_path: string | null
   final_video_path: string | null
+  duration_seconds: number | null
   error_message: string | null
   created_at: string
   started_at: string | null
@@ -234,6 +235,7 @@ export type TaskSummary = {
   status: TaskStatus
   current_stage: string | null
   final_video_path: string | null
+  duration_seconds: number | null
   error_message: string | null
   created_at: string
   started_at: string | null
@@ -262,6 +264,7 @@ export type TaskListParams = {
   status?: TaskListStatus
   execution_mode?: TaskListExecutionMode
   sort?: TaskListSort
+  hide_completed?: boolean
 }
 
 export type TaskListResponse = {
@@ -269,6 +272,18 @@ export type TaskListResponse = {
   total: number
   page: number
   page_size: number
+}
+
+export type RequeueAllTasksResponse = {
+  queued: number
+  task_ids: string[]
+}
+
+export type WorkerStatus = {
+  running: boolean
+  thread_alive: boolean
+  queue_size: number
+  current_task_id: string | null
 }
 
 export function getCurrentTask() {
@@ -294,6 +309,22 @@ export function listTasks(params: TaskListParams | number = {}) {
 
   const query = search.toString()
   return request<TaskListResponse>(`/api/tasks${query ? `?${query}` : ""}`)
+}
+
+export function requeueAllTasks() {
+  return request<RequeueAllTasksResponse>("/api/tasks/requeue-all", { method: "POST" })
+}
+
+export function getWorkerStatus() {
+  return request<WorkerStatus>("/api/worker")
+}
+
+export function startWorker() {
+  return request<WorkerStatus>("/api/worker/start", { method: "POST" })
+}
+
+export function stopWorker() {
+  return request<WorkerStatus>("/api/worker/stop", { method: "POST" })
 }
 
 export function getTask(taskId: string) {

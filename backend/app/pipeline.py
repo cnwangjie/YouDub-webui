@@ -53,6 +53,16 @@ def _require_existing(path: Path, name: str) -> Path:
     return path
 
 
+def _duration_seconds(value) -> int | None:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return round(duration)
+
+
 class PipelineRunner:
     def __init__(self, task_id: str):
         self.task_id = task_id
@@ -292,7 +302,12 @@ class PipelineRunner:
         self.artifacts.session = session
         self.artifacts.video_file = session / "media" / "video_source.mp4"
         title = (info.get("title") or "").strip() or None
-        database.update_task(self.task_id, session_path=str(session), title=title)
+        database.update_task(
+            self.task_id,
+            session_path=str(session),
+            title=title,
+            duration_seconds=_duration_seconds(info.get("duration")),
+        )
         self.stage_message("download", f"[{source.name}] {title or 'Downloaded'} -> {session}")
 
     def _separate(self, _: dict) -> None:

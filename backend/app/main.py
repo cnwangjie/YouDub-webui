@@ -198,6 +198,23 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/worker")
+def get_worker_status() -> dict:
+    return worker.status()
+
+
+@app.post("/api/worker/start")
+def start_worker() -> dict:
+    worker.start(run_task)
+    return worker.status()
+
+
+@app.post("/api/worker/stop")
+def stop_worker() -> dict:
+    worker.pause()
+    return worker.status()
+
+
 def _ensure_runtime_ready() -> None:
     try:
         validate_runtime_device()
@@ -349,6 +366,7 @@ def list_tasks(
     status: TaskListStatus = "all",
     execution_mode: TaskListExecutionMode = "all",
     sort: TaskListSort = "created_desc",
+    hide_completed: bool = Query(False),
 ) -> dict:
     return database.list_tasks_page(
         page=page,
@@ -357,6 +375,7 @@ def list_tasks(
         status=status,
         execution_mode=execution_mode,
         sort=sort,
+        hide_completed=hide_completed,
     )
 
 
@@ -366,6 +385,16 @@ def task_detail(task_id: str) -> dict:
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
     return task
+
+
+@app.post("/api/tasks/requeue-all")
+def requeue_all_tasks() -> dict:
+    _ensure_runtime_ready()
+    task_ids = database.list_requeueable_task_ids()
+    for task_id in task_ids:
+        database.queue_task_for_continue(task_id)
+        worker.enqueue(task_id)
+    return {"queued": len(task_ids), "task_ids": task_ids}
 
 
 def _is_inside_workfolder(path: Path) -> bool:

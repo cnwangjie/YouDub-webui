@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ..config import ffmpeg_binary
+from ..config import ffmpeg_binary, ffprobe_binary
 from ..sanitize import sanitize_text
 from ..sources import SourceConfig
 from ..youtube import local_upload_task_id
@@ -86,6 +86,29 @@ def _transcode_to_mp4(source_file: Path, video_file: Path) -> None:
     )
 
 
+def _probe_duration_seconds(video_file: Path) -> int | None:
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_binary(),
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_file),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        duration = float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+    return round(duration) if duration > 0 else None
+
+
 def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tuple[Path, dict]:
     from .local_subtitles import uploaded_subtitle_file
 
@@ -114,13 +137,21 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
     }
     if subtitle_file:
         info["subtitle_path"] = str(subtitle_file)
-    metadata_file = metadata_dir / "local_info.json"
-    metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if video_file.exists() and video_file.stat().st_size > 0:
+        duration = _probe_duration_seconds(video_file)
+        if duration is not None:
+            info["duration"] = duration
+        metadata_file = metadata_dir / "local_info.json"
+        metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
         return session, info
 
     _transcode_to_mp4(source_file, video_file)
     if not video_file.exists() or video_file.stat().st_size == 0:
         raise RuntimeError("ffmpeg finished without producing media/video_source.mp4")
+    duration = _probe_duration_seconds(video_file)
+    if duration is not None:
+        info["duration"] = duration
+    metadata_file = metadata_dir / "local_info.json"
+    metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     return session, info
