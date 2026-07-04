@@ -20,7 +20,7 @@ from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_translate import list_models as list_openai_models
 from .adapters.openai_translate import test_connection as test_openai_connection
 from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
-from .pipeline import run_task
+from .pipeline import run_task_stage
 from .runtime_checks import validate_runtime_device
 from .sanitize import sanitize_text
 from .sources import detect_source
@@ -150,7 +150,7 @@ async def lifespan(app: FastAPI):
         fail_stale_running_publishes()
     except Exception:
         pass
-    worker.start(run_task)
+    worker.start(run_task_stage)
     yield
 
 
@@ -205,7 +205,7 @@ def get_worker_status() -> dict:
 
 @app.post("/api/worker/start")
 def start_worker() -> dict:
-    worker.start(run_task)
+    worker.start(run_task_stage)
     return worker.status()
 
 

@@ -14,6 +14,7 @@ from .stages import STAGES
 
 
 ACTIVE_STATUSES = ("queued", "running")
+STALE_ON_RESTART_STATUSES = ("running",)
 EXECUTION_MODES = ("auto", "manual")
 DEFAULT_EXECUTION_MODE = "auto"
 TASK_STATUSES = ("queued", "running", "paused", "succeeded", "failed", "cancelled")
@@ -143,30 +144,29 @@ def backfill_titles_from_metadata() -> None:
 
 
 def fail_stale_active_tasks() -> None:
-    message = "Backend restarted before the task completed."
-    completed_at = now_iso()
     with connect() as conn:
         active_tasks = conn.execute(
-            f"SELECT id, current_stage FROM tasks WHERE status IN ({','.join('?' for _ in ACTIVE_STATUSES)})",
-            ACTIVE_STATUSES,
+            "SELECT id, current_stage FROM tasks WHERE status IN "
+            f"({','.join('?' for _ in STALE_ON_RESTART_STATUSES)})",
+            STALE_ON_RESTART_STATUSES,
         ).fetchall()
         for task in active_tasks:
             conn.execute(
                 """
                 UPDATE tasks
-                SET status = 'failed', error_message = ?, completed_at = ?
+                SET status = 'queued', error_message = NULL, completed_at = NULL
                 WHERE id = ?
                 """,
-                (message, completed_at, task["id"]),
+                (task["id"],),
             )
             if task["current_stage"]:
                 conn.execute(
                     """
                     UPDATE task_stages
-                    SET status = 'failed', error_message = ?, completed_at = ?
+                    SET status = 'pending', error_message = NULL, completed_at = NULL
                     WHERE task_id = ? AND name = ? AND status IN ('pending', 'running')
                     """,
-                    (message, completed_at, task["id"], task["current_stage"]),
+                    (task["id"], task["current_stage"]),
                 )
 
 

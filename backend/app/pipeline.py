@@ -153,6 +153,107 @@ class PipelineRunner:
         finally:
             cancellation.clear_cancel(self.task_id)
 
+    def run_next_stage(self) -> None:
+        task = database.get_task(self.task_id)
+        if not task:
+            return
+        status = task["status"]
+        if status not in ("queued", "paused"):
+            return
+        cancellation.clear_cancel(self.task_id)
+        self._raise_if_cancelled()
+
+        updates: dict[str, str] = {"status": "running"}
+        if not task.get("started_at"):
+            updates["started_at"] = database.now_iso()
+        database.update_task(self.task_id, **updates)
+        if not task.get("started_at"):
+            self.log("Task started")
+
+        try:
+            validate_runtime_device()
+            current_task = database.get_task(self.task_id)
+            next_stage = None
+            for stage in STAGES:
+                self._raise_if_cancelled()
+                if self._stage_status(stage.name) == "succeeded":
+                    database.update_task(self.task_id, current_stage=stage.name)
+                    database.update_stage(self.task_id, stage.name, progress=100)
+                    self._restore_cached_stage(stage.name, database.get_task(self.task_id))
+                    continue
+                next_stage = stage
+                break
+
+            if next_stage is None:
+                database.update_task(
+                    self.task_id,
+                    status="succeeded",
+                    current_stage="done",
+                    final_video_path=str(_require(self.artifacts.final_video, "final_video")),
+                    completed_at=database.now_iso(),
+                )
+                self.log("Task succeeded")
+                return
+
+            self._run_stage(next_stage.name)
+            self._raise_if_cancelled()
+
+            task_after_stage = database.get_task(self.task_id)
+            execution_mode = (task_after_stage or current_task or task).get("execution_mode") or database.DEFAULT_EXECUTION_MODE
+            if execution_mode == "manual":
+                database.update_task(self.task_id, status="paused")
+                self.log(f"Paused after [{next_stage.name}], waiting for manual continue")
+                return
+
+            remaining = [
+                stage.name
+                for stage in STAGES
+                if self._stage_status(stage.name) != "succeeded"
+            ]
+            if remaining:
+                database.update_task(
+                    self.task_id,
+                    status="queued",
+                    current_stage=remaining[0],
+                    error_message=None,
+                    completed_at=None,
+                )
+                return
+
+            database.update_task(
+                self.task_id,
+                status="succeeded",
+                current_stage="done",
+                final_video_path=str(_require(self.artifacts.final_video, "final_video")),
+                completed_at=database.now_iso(),
+            )
+            self.log("Task succeeded")
+        except cancellation.TaskCancelled as exc:
+            database.cancel_task(self.task_id, str(exc))
+            self.log(str(exc))
+        except Exception as exc:
+            current = database.get_task(self.task_id)
+            failed_stage = current["current_stage"] if current else None
+            if failed_stage and failed_stage != "done":
+                database.update_stage(
+                    self.task_id,
+                    failed_stage,
+                    status="failed",
+                    completed_at=database.now_iso(),
+                    error_message=str(exc),
+                    last_message="Failed",
+                )
+            database.update_task(
+                self.task_id,
+                status="failed",
+                error_message=str(exc),
+                completed_at=database.now_iso(),
+            )
+            self.log("Task failed")
+            self.log(traceback.format_exc())
+        finally:
+            cancellation.clear_cancel(self.task_id)
+
     def log(self, message: str) -> None:
         _write_log(self.task_id, message)
 
@@ -495,3 +596,7 @@ class PipelineRunner:
 
 def run_task(task_id: str) -> None:
     PipelineRunner(task_id).run()
+
+
+def run_task_stage(task_id: str) -> None:
+    PipelineRunner(task_id).run_next_stage()

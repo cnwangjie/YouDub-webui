@@ -24,3 +24,14 @@ STAGES: tuple[StageSpec, ...] = (
 
 STAGE_NAMES = tuple(stage.name for stage in STAGES)
 
+STAGE_RESOURCES = {
+    "download": "io",
+    "translate": "io",
+    "separate": "compute",
+    "asr": "compute",
+    "asr_fix": "compute",
+    "split_audio": "compute",
+    "tts": "compute",
+    "merge_audio": "compute",
+    "merge_video": "compute",
+}
