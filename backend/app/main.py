@@ -26,7 +26,7 @@ from .sanitize import sanitize_text
 from .sources import detect_source
 from .stage_reset import remove_stage_artifacts
 from .stages import STAGE_NAMES
-from .youtube import LOCAL_UPLOAD_DIRECTIONS, extract_video_id, is_local_upload_url
+from .youtube import LOCAL_UPLOAD_DIRECTIONS, extract_video_id, is_local_upload_url, normalize_video_url
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 ALLOWED_SUBTITLE_SUFFIXES = {".srt"}
@@ -86,6 +86,8 @@ class OpenAISettingsUpdate(BaseModel):
     api_key: str = ""
     clear_api_key: bool = False
     model: str
+    preprocess_model: str = ""
+    metadata_model: str = ""
     translate_concurrency: str = ""
     translate_use_batch: bool = True
 
@@ -240,8 +242,8 @@ def normalize_execution_mode(value: str) -> str:
 
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
-    url = payload.url.strip()
     try:
+        url = normalize_video_url(payload.url)
         video_id = extract_video_id(url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -814,6 +816,8 @@ def get_openai_settings() -> dict:
         "api_key": mask_secret(settings["api_key"]),
         "has_api_key": bool(settings["api_key"]),
         "model": settings["model"],
+        "preprocess_model": settings["preprocess_model"],
+        "metadata_model": settings["metadata_model"],
         "translate_concurrency": settings["translate_concurrency"],
         "translate_use_batch": bool_setting(settings["translate_use_batch"]),
     }
@@ -827,6 +831,8 @@ def save_openai_settings(payload: OpenAISettingsUpdate) -> dict:
         payload.model,
         normalize_translate_concurrency(payload.translate_concurrency),
         "true" if payload.translate_use_batch else "false",
+        preprocess_model=payload.preprocess_model,
+        metadata_model=payload.metadata_model,
         clear_api_key=payload.clear_api_key,
     )
     return get_openai_settings()
@@ -871,6 +877,8 @@ def sync_settings_from_env() -> dict:
             "api_key": mask_secret(openai["api_key"]),
             "has_api_key": bool(openai["api_key"]),
             "model": openai["model"],
+            "preprocess_model": openai["preprocess_model"],
+            "metadata_model": openai["metadata_model"],
             "translate_concurrency": openai["translate_concurrency"],
             "translate_use_batch": bool_setting(openai["translate_use_batch"]),
         },

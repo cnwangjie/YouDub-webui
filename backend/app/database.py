@@ -670,6 +670,8 @@ def get_openai_settings() -> dict[str, str]:
         "base_url": normalize_openai_base_url(get_setting("openai.base_url", defaults["base_url"])),
         "api_key": get_setting("openai.api_key", defaults["api_key"]),
         "model": get_setting("openai.model", defaults["model"]),
+        "preprocess_model": get_setting("openai.preprocess_model", defaults["preprocess_model"]),
+        "metadata_model": get_setting("openai.metadata_model", defaults["metadata_model"]),
         "translate_concurrency": get_setting(
             "openai.translate_concurrency", defaults["translate_concurrency"]
         ),
@@ -686,6 +688,8 @@ def save_openai_settings(
     translate_concurrency: str = "",
     translate_use_batch: str = "true",
     *,
+    preprocess_model: str = "",
+    metadata_model: str = "",
     clear_api_key: bool = False,
 ) -> None:
     from .adapters.openai_client import normalize_openai_base_url
@@ -697,6 +701,8 @@ def save_openai_settings(
     elif cleaned_api_key and set(cleaned_api_key) != {"*"}:
         set_setting("openai.api_key", cleaned_api_key)
     set_setting("openai.model", model.strip())
+    set_setting("openai.preprocess_model", preprocess_model.strip())
+    set_setting("openai.metadata_model", metadata_model.strip())
     if translate_concurrency.strip():
         set_setting("openai.translate_concurrency", translate_concurrency.strip())
     set_setting("openai.translate_use_batch", translate_use_batch.strip().lower())

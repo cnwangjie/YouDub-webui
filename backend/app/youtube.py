@@ -11,6 +11,31 @@ LOCAL_UPLOAD_SCHEME = "local"
 LOCAL_UPLOAD_HOST = "upload"
 LOCAL_UPLOAD_DIRECTIONS = {"en-zh", "zh-en"}
 LOCAL_UPLOAD_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+SCHEMELESS_VIDEO_HOSTS = (
+    "youtu.be/",
+    "www.youtu.be/",
+    "youtube.com/",
+    "www.youtube.com/",
+    "m.youtube.com/",
+    "bilibili.com/",
+    "www.bilibili.com/",
+    "m.bilibili.com/",
+)
+
+
+def _parse_video_url(url: str):
+    raw = url.strip()
+    parsed = urlparse(raw)
+    if parsed.scheme:
+        return parsed
+    lowered = raw.lower()
+    if lowered.startswith(SCHEMELESS_VIDEO_HOSTS):
+        return urlparse(f"https://{raw}")
+    return parsed
+
+
+def _is_youtube_host(host: str) -> bool:
+    return host == "youtube.com" or host.endswith(".youtube.com")
 
 
 def _extract_youtube_id(parsed) -> str | None:
@@ -22,7 +47,7 @@ def _extract_youtube_id(parsed) -> str | None:
         if YOUTUBE_ID_RE.match(candidate):
             return candidate
 
-    if "youtube.com" not in host:
+    if not _is_youtube_host(host):
         return None
 
     query_id = parse_qs(parsed.query).get("v", [""])[0]
@@ -47,22 +72,33 @@ def _extract_bilibili_id(parsed) -> str | None:
 
 
 def extract_video_id(url: str) -> str:
-    parsed = urlparse(url.strip())
+    parsed = _parse_video_url(url)
     video_id = _extract_youtube_id(parsed) or _extract_bilibili_id(parsed)
     if video_id:
         return video_id
     raise ValueError("Only YouTube or Bilibili single-video URLs are supported.")
 
 
+def normalize_video_url(url: str) -> str:
+    parsed = _parse_video_url(url)
+    youtube_id = _extract_youtube_id(parsed)
+    if youtube_id:
+        return f"https://www.youtube.com/watch?v={youtube_id}"
+    bilibili_id = _extract_bilibili_id(parsed)
+    if bilibili_id:
+        return f"https://www.bilibili.com/video/{bilibili_id}"
+    raise ValueError("Only YouTube or Bilibili single-video URLs are supported.")
+
+
 def is_youtube_url(url: str) -> bool:
     try:
-        return _extract_youtube_id(urlparse(url.strip())) is not None
+        return _extract_youtube_id(_parse_video_url(url)) is not None
     except ValueError:
         return False
 
 
 def is_bilibili_url(url: str) -> bool:
-    return urlparse(url.strip()).netloc.lower() in BILIBILI_HOSTS
+    return _parse_video_url(url).netloc.lower() in BILIBILI_HOSTS
 
 
 def local_upload_task_id(url: str) -> str:

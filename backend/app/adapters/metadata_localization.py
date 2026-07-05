@@ -253,10 +253,11 @@ def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
     thumbnail_file = download_thumbnail(session, thumbnail_url)
 
     settings = get_openai_settings()
+    model = str(settings.get("metadata_model") or "").strip() or settings["model"]
     client = _client(settings["base_url"], settings["api_key"])
     translated = _call_json(
         client,
-        settings["model"],
+        model,
         "You output strict JSON only.",
         _translate_prompt(source=source, title=title, description=description, tags=tags),
     )
@@ -290,7 +291,7 @@ def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
         "translated_title": translated_title,
         "translated_description": translated_description,
         "translated_tags": translated_tags,
-        "model": settings["model"],
+        "model": model,
         "base_url": normalize_openai_base_url(settings["base_url"]),
     }
     path = artifact_path(session)

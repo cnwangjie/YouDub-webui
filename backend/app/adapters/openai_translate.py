@@ -21,7 +21,7 @@ from .openai_client import normalize_openai_base_url
 
 log = logging.getLogger(__name__)
 
-API_SETTING_KEYS = ("base_url", "api_key", "model")
+API_SETTING_KEYS = ("base_url", "api_key", "model", "preprocess_model")
 PREPROCESS_RETRY = 2
 TRANSLATE_RETRY = 2
 DESCRIPTION_LIMIT = 500
@@ -771,13 +771,24 @@ def translate_asr(
     meta = _read_meta(session)
 
     api = {key: settings[key] for key in API_SETTING_KEYS if key in settings}
+    preprocess_model = str(api.get("preprocess_model") or "").strip() or str(api["model"]).strip()
+    preprocess_api = {
+        "base_url": api["base_url"],
+        "api_key": api["api_key"],
+        "model": preprocess_model,
+    }
+    translate_api = {
+        "base_url": api["base_url"],
+        "api_key": api["api_key"],
+        "model": api["model"],
+    }
     if log_callback:
         log_callback("Checking translation preprocess artifact")
     pre = load_preprocess_artifact(session)
     if pre is None:
         if log_callback:
             log_callback("Running translation preprocess request")
-        pre = preprocess(full_text, meta, source, **api, log_callback=log_callback)
+        pre = preprocess(full_text, meta, source, **preprocess_api, log_callback=log_callback)
         if log_callback:
             log_callback("Writing translation preprocess artifact")
         write_preprocess_artifact(session, pre)
@@ -814,7 +825,7 @@ def translate_asr(
         source,
         meta,
         pre,
-        **api,
+        **translate_api,
         concurrency=_concurrency_from(settings),
         use_batch=_use_batch_from(settings),
         cached_translations=cached_translations,

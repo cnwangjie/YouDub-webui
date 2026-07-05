@@ -223,6 +223,20 @@ def test_task_id_is_video_id_and_dedupes_existing(monkeypatch, tmp_path):
     assert enqueued == ["abcdefghijk"]
 
 
+def test_create_task_normalizes_youtube_share_url(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    enqueued: list[str] = []
+    monkeypatch.setattr(main.worker, "enqueue", lambda task_id: enqueued.append(task_id))
+    client = TestClient(main.app)
+
+    response = client.post("/api/tasks", json={"url": "youtu.be/abcdefghijk?si=sharetoken"})
+
+    assert response.status_code == 201
+    assert response.json()["id"] == "abcdefghijk"
+    assert response.json()["url"] == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert enqueued == ["abcdefghijk"]
+
+
 def test_different_videos_create_separate_tasks(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     enqueued: list[str] = []
@@ -690,6 +704,33 @@ def test_openai_settings_empty_translate_concurrency_preserves_existing(monkeypa
     settings = database.get_openai_settings()
     assert settings["translate_concurrency"] == "64"
     assert settings["model"] == "next-model"
+
+
+def test_openai_settings_persists_task_specific_models(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/api/settings/openai",
+        json={
+            "base_url": "https://example.com/v1",
+            "api_key": "",
+            "clear_api_key": False,
+            "model": "translation-model",
+            "preprocess_model": "preprocess-model",
+            "metadata_model": "metadata-model",
+            "translate_concurrency": "8",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "translation-model"
+    assert body["preprocess_model"] == "preprocess-model"
+    assert body["metadata_model"] == "metadata-model"
+    settings = database.get_openai_settings()
+    assert settings["preprocess_model"] == "preprocess-model"
+    assert settings["metadata_model"] == "metadata-model"
 
 
 @pytest.mark.parametrize("value", ["1", "200"])

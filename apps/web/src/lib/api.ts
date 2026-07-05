@@ -57,6 +57,8 @@ export type OpenAISettings = {
   api_key: string
   has_api_key: boolean
   model: string
+  preprocess_model: string
+  metadata_model: string
   translate_concurrency: string
   translate_use_batch: boolean
 }
@@ -485,6 +487,8 @@ export function saveOpenAISettings(settings: {
   api_key: string
   clear_api_key?: boolean
   model: string
+  preprocess_model: string
+  metadata_model: string
   translate_concurrency: string
   translate_use_batch: boolean
 }) {

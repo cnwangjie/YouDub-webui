@@ -9,6 +9,7 @@ from backend.app.youtube import (
     is_youtube_url,
     local_upload_direction,
     local_upload_task_id,
+    normalize_video_url,
 )
 
 
@@ -18,6 +19,21 @@ def test_extract_video_id_from_watch_url():
 
 def test_extract_video_id_from_shorts_url():
     assert extract_video_id("https://youtube.com/shorts/abcdefghijk?feature=share") == "abcdefghijk"
+
+
+def test_normalize_youtube_share_urls():
+    assert (
+        normalize_video_url("https://youtu.be/abcdefghijk?si=sharetoken")
+        == "https://www.youtube.com/watch?v=abcdefghijk"
+    )
+    assert (
+        normalize_video_url("youtu.be/abcdefghijk?si=sharetoken")
+        == "https://www.youtube.com/watch?v=abcdefghijk"
+    )
+    assert (
+        normalize_video_url("m.youtube.com/shorts/abcdefghijk?feature=share")
+        == "https://www.youtube.com/watch?v=abcdefghijk"
+    )
 
 
 def test_rejects_playlist_only_url():

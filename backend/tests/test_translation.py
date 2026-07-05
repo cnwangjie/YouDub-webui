@@ -166,6 +166,25 @@ def test_translate_asr_invokes_translate_batch_with_all_texts_at_once(tmp_path, 
     assert seen[0]["pre"].hotwords[0].src == "x"
 
 
+def test_translate_asr_uses_separate_preprocess_model(tmp_path, monkeypatch):
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    asr_file = metadata / "asr.json"
+    _write_asr(asr_file, 2)
+    preprocess_seen = _stub_preprocess(monkeypatch)
+    translate_seen = _stub_translate_batch(monkeypatch, lambda t: f"zh:{t}")
+
+    openai_translate.translate_asr(
+        asr_file,
+        tmp_path,
+        {**_settings(), "preprocess_model": "preprocess-model"},
+        YT_SOURCE,
+    )
+
+    assert preprocess_seen[0]["model"] == "preprocess-model"
+    assert translate_seen[0]["model"] == "model-x"
+
+
 def test_translate_asr_resumes_from_partial_cache(tmp_path, monkeypatch):
     metadata = tmp_path / "metadata"
     metadata.mkdir()

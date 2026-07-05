@@ -41,6 +41,8 @@ type SettingsForm = {
   baseUrl: string
   apiKey: string
   model: string
+  preprocessModel: string
+  metadataModel: string
   translateConcurrency: string
   translateUseBatch: boolean
   proxyPort: string
@@ -56,6 +58,8 @@ const defaultSettings: SettingsForm = {
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
+  preprocessModel: "",
+  metadataModel: "",
   translateConcurrency: "5",
   translateUseBatch: true,
   proxyPort: "",
@@ -102,11 +106,13 @@ export function SettingsDialog() {
           baseUrl: openai.base_url,
           apiKey: openai.has_api_key ? openai.api_key || SAVED_API_KEY_MASK : "",
           model: openai.model,
+          preprocessModel: openai.preprocess_model || "",
+          metadataModel: openai.metadata_model || "",
           translateConcurrency: openai.translate_concurrency || "5",
           translateUseBatch: openai.translate_use_batch,
           proxyPort: ytdlp.proxy_port,
         })
-        setModelOptions(uniqueModels([openai.model]))
+        setModelOptions(uniqueModels([openai.model, openai.preprocess_model, openai.metadata_model]))
         setModelsLoaded(false)
         setShowApiKey(false)
         setCookieDirty(false)
@@ -132,6 +138,8 @@ export function SettingsDialog() {
         api_key: apiKeyDirty ? settings.apiKey : "",
         clear_api_key: clearApiKey,
         model: settings.model,
+        preprocess_model: settings.preprocessModel,
+        metadata_model: settings.metadataModel,
         translate_concurrency: settings.translateConcurrency,
         translate_use_batch: settings.translateUseBatch,
       })
@@ -141,6 +149,8 @@ export function SettingsDialog() {
         ...current,
         apiKey: openai.has_api_key ? openai.api_key || SAVED_API_KEY_MASK : "",
         cookie: cookieDirty ? (cookie?.exists ? SAVED_COOKIE_SENTINEL : "") : current.cookie,
+        preprocessModel: openai.preprocess_model || "",
+        metadataModel: openai.metadata_model || "",
         translateConcurrency: openai.translate_concurrency || current.translateConcurrency,
         translateUseBatch: openai.translate_use_batch,
         proxyPort: ytdlp.proxy_port,
@@ -162,7 +172,12 @@ export function SettingsDialog() {
         base_url: settings.baseUrl,
         api_key: apiKeyDirty ? settings.apiKey : "",
       })
-      const models = uniqueModels([settings.model, ...response.models])
+      const models = uniqueModels([
+        settings.model,
+        settings.preprocessModel,
+        settings.metadataModel,
+        ...response.models,
+      ])
       setModelOptions(models)
       setModelsLoaded(true)
       setSettings((current) => ({ ...current, model: current.model || models[0] || "" }))
@@ -205,11 +220,19 @@ export function SettingsDialog() {
         baseUrl: synced.openai.base_url,
         apiKey: synced.openai.has_api_key ? synced.openai.api_key || SAVED_API_KEY_MASK : "",
         model: synced.openai.model,
+        preprocessModel: synced.openai.preprocess_model || "",
+        metadataModel: synced.openai.metadata_model || "",
         translateConcurrency: synced.openai.translate_concurrency || "5",
         translateUseBatch: synced.openai.translate_use_batch,
         proxyPort: synced.ytdlp.proxy_port,
       }))
-      setModelOptions(uniqueModels([synced.openai.model]))
+      setModelOptions(
+        uniqueModels([
+          synced.openai.model,
+          synced.openai.preprocess_model,
+          synced.openai.metadata_model,
+        ])
+      )
       setModelsLoaded(false)
       setShowApiKey(false)
       setApiKeyDirty(false)
@@ -388,6 +411,33 @@ export function SettingsDialog() {
                   </Button>
                 </div>
               </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-2">
+                  <Label htmlFor="preprocessModel">{t.settings.preprocessModel}</Label>
+                  <Input
+                    id="preprocessModel"
+                    value={settings.preprocessModel}
+                    onChange={(event) =>
+                      setSettings((current) => ({ ...current, preprocessModel: event.target.value }))
+                    }
+                    placeholder={settings.model}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="metadataModel">{t.settings.metadataModel}</Label>
+                  <Input
+                    id="metadataModel"
+                    value={settings.metadataModel}
+                    onChange={(event) =>
+                      setSettings((current) => ({ ...current, metadataModel: event.target.value }))
+                    }
+                    placeholder={settings.model}
+                  />
+                </div>
+              </div>
+              <p className="-mt-2 text-xs text-muted-foreground">
+                {t.settings.taskModelHelp}
+              </p>
               <div className="grid gap-2">
                 <Label htmlFor="translateConcurrency">{t.settings.translateConcurrency}</Label>
                 <Input
