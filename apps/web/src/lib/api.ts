@@ -28,6 +28,10 @@ export type Task = {
   id: string
   url: string
   title: string | null
+  source_author: string | null
+  source_description: string | null
+  source_published_at: string | null
+  thumbnail_url: string | null
   status: TaskStatus
   current_stage: string | null
   session_path: string | null
@@ -126,6 +130,8 @@ export type BilibiliPublishStatus = {
   error: string
   result: unknown
 }
+
+export type TaskPublishStatus = "unpublished" | "draft" | "running" | "succeeded" | "failed"
 
 export type BilibiliPublishRecord = {
   task_id: string
@@ -232,8 +238,12 @@ export type TaskSummary = {
   id: string
   url: string
   title: string | null
+  source_author: string | null
+  source_published_at: string | null
+  thumbnail_url: string | null
   status: TaskStatus
   current_stage: string | null
+  session_path: string | null
   final_video_path: string | null
   duration_seconds: number | null
   error_message: string | null
@@ -241,9 +251,11 @@ export type TaskSummary = {
   started_at: string | null
   completed_at: string | null
   execution_mode?: ExecutionMode
+  stages: TaskStage[]
+  bilibili_publish_status: TaskPublishStatus
 }
 
-export type TaskListStatus = "all" | TaskStatus
+export type TaskListStatus = "all" | "incomplete" | TaskStatus
 export type TaskListExecutionMode = "all" | ExecutionMode
 export type TaskListSort =
   | "created_desc"

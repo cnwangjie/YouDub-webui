@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.app import config, database
 from backend.app import main
 from backend.app import worker
+from backend.app.adapters import ytdlp
 
 
 def configure_tmp_runtime(monkeypatch, tmp_path):
@@ -24,6 +25,19 @@ def configure_tmp_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "start", lambda runner: None)
     monkeypatch.setattr(worker, "enqueue", lambda task_id: None)
     monkeypatch.setattr(main.worker, "enqueue", lambda task_id: None)
+    monkeypatch.setattr(
+        ytdlp,
+        "fetch_video_info",
+        lambda url, source, proxy_port="": {
+            "id": url.rsplit("=", 1)[-1].rsplit("/", 1)[-1],
+            "title": "Fetched title",
+            "uploader": "Fetched author",
+            "description": "Fetched description",
+            "upload_date": "20260704",
+            "thumbnail": "https://example.com/thumbnail.jpg",
+            "duration": 123,
+        },
+    )
     database.init_db()
 
 
@@ -200,6 +214,12 @@ def test_task_id_is_video_id_and_dedupes_existing(monkeypatch, tmp_path):
     assert second.status_code == 201
     assert first.json()["id"] == "abcdefghijk"
     assert second.json()["id"] == "abcdefghijk"
+    assert first.json()["title"] == "Fetched title"
+    assert first.json()["source_author"] == "Fetched author"
+    assert first.json()["source_description"] == "Fetched description"
+    assert first.json()["source_published_at"] == "2026-07-04"
+    assert first.json()["thumbnail_url"] == "https://example.com/thumbnail.jpg"
+    assert first.json()["duration_seconds"] == 123
     assert enqueued == ["abcdefghijk"]
 
 
@@ -249,6 +269,14 @@ def test_list_tasks_returns_history_newest_first(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     older = database.create_task("https://www.youtube.com/watch?v=oldvideoidx")
     newer = database.create_task("https://www.youtube.com/watch?v=newvideoidx")
+    database.update_task(older, final_video_path=str(tmp_path / "final.mp4"))
+    session = config.WORKFOLDER / "uploader" / "new-video"
+    (session / "metadata").mkdir(parents=True)
+    (session / "metadata" / "bilibili_publish.json").write_text(
+        json.dumps({"status": "succeeded"}),
+        encoding="utf-8",
+    )
+    database.update_task(newer, session_path=str(session))
     client = TestClient(main.app)
 
     response = client.get("/api/tasks")
@@ -260,7 +288,10 @@ def test_list_tasks_returns_history_newest_first(monkeypatch, tmp_path):
     assert body["total"] == 2
     assert body["page"] == 1
     assert body["page_size"] == 20
-    assert "stages" not in body["tasks"][0]
+    assert len(body["tasks"][0]["stages"]) == 9
+    assert body["tasks"][0]["stages"][0]["name"] == "download"
+    assert body["tasks"][0]["bilibili_publish_status"] == "succeeded"
+    assert body["tasks"][1]["bilibili_publish_status"] == "draft"
     assert set(body["tasks"][0].keys()) >= {"id", "url", "title", "status", "final_video_path"}
 
 
@@ -303,6 +334,33 @@ def test_list_tasks_filters_status_and_execution_mode(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert task_ids(response) == [target]
     assert response.json()["total"] == 1
+
+
+def test_list_tasks_incomplete_status_excludes_succeeded(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    succeeded = make_history_task(
+        "done-task",
+        status="succeeded",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+    queued = make_history_task(
+        "queued-task",
+        status="queued",
+        created_at="2024-01-02T00:00:00+00:00",
+    )
+    failed = make_history_task(
+        "failed-task",
+        status="failed",
+        created_at="2024-01-03T00:00:00+00:00",
+    )
+    client = TestClient(main.app)
+
+    assert task_ids(client.get("/api/tasks?status=incomplete&sort=created_asc")) == [queued, failed]
+    assert task_ids(client.get("/api/tasks?status=all&sort=created_asc")) == [
+        succeeded,
+        queued,
+        failed,
+    ]
 
 
 def test_list_tasks_paginates_with_total(monkeypatch, tmp_path):
@@ -735,6 +793,32 @@ def test_continue_task_can_switch_to_auto(monkeypatch, tmp_path):
     assert body["status"] == "queued"
     assert body["execution_mode"] == "auto"
     assert enqueued == [task_id]
+
+
+def test_requeue_all_includes_failed_tasks(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    paused = database.create_task("https://www.youtube.com/watch?v=pausedallxx", task_id="pausedallxx")
+    cancelled = database.create_task("https://www.youtube.com/watch?v=cancelallxx", task_id="cancelallxx")
+    failed = database.create_task("https://www.youtube.com/watch?v=failedallxx", task_id="failedallxx")
+    database.update_task(paused, status="paused")
+    database.update_task(cancelled, status="cancelled", error_message="cancelled")
+    database.update_task(failed, status="failed", error_message="boom", completed_at=database.now_iso())
+    database.update_stage(failed, "translate", status="failed", progress=12, error_message="boom")
+    enqueued: list[str] = []
+    monkeypatch.setattr(main.worker, "enqueue", lambda tid: enqueued.append(tid))
+
+    client = TestClient(main.app)
+    response = client.post("/api/tasks/requeue-all")
+
+    assert response.status_code == 200
+    assert response.json()["task_ids"] == [paused, cancelled, failed]
+    assert enqueued == [paused, cancelled, failed]
+    failed_task = database.get_task(failed)
+    failed_stages = {stage["name"]: stage for stage in failed_task["stages"]}
+    assert failed_task["status"] == "queued"
+    assert failed_task["error_message"] is None
+    assert failed_stages["translate"]["status"] == "pending"
+    assert failed_stages["translate"]["error_message"] is None
 
 
 def test_continue_task_rejects_auto_task(monkeypatch, tmp_path):

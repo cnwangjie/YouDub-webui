@@ -34,7 +34,16 @@ LOCAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_LOCAL_UPLOAD_BYTES = int(os.getenv("LOCAL_UPLOAD_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
 MAX_LOCAL_SUBTITLE_BYTES = int(os.getenv("LOCAL_SUBTITLE_MAX_BYTES", str(20 * 1024 * 1024)))
 
-TaskListStatus = Literal["all", "queued", "running", "paused", "succeeded", "failed", "cancelled"]
+TaskListStatus = Literal[
+    "all",
+    "incomplete",
+    "queued",
+    "running",
+    "paused",
+    "succeeded",
+    "failed",
+    "cancelled",
+]
 TaskListExecutionMode = Literal["all", "auto", "manual"]
 TaskListSort = Literal[
     "created_desc",
@@ -231,8 +240,9 @@ def normalize_execution_mode(value: str) -> str:
 
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
+    url = payload.url.strip()
     try:
-        video_id = extract_video_id(payload.url)
+        video_id = extract_video_id(url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -240,16 +250,28 @@ def create_task(payload: TaskCreate) -> dict:
     if existing_id:
         return database.get_task(existing_id)
 
-    if payload.auto_start:
-        _ensure_runtime_ready()
+    _ensure_runtime_ready()
+    source = detect_source(url)
+    try:
+        from .adapters.ytdlp import fetch_video_info, public_video_info
+
+        proxy_port = database.get_ytdlp_settings()["proxy_port"]
+        metadata = public_video_info(fetch_video_info(url, source, proxy_port))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch video metadata: {exc}") from exc
     task_id = database.create_task(
-        payload.url.strip(),
+        url,
         task_id=video_id,
         execution_mode=normalize_execution_mode(payload.execution_mode),
-        auto_start=payload.auto_start,
+        auto_start=True,
+        title=metadata["title"] or None,
+        source_author=metadata["source_author"] or None,
+        source_description=metadata["source_description"] or None,
+        source_published_at=metadata["source_published_at"] or None,
+        thumbnail_url=metadata["thumbnail_url"] or None,
+        duration_seconds=metadata["duration_seconds"],
     )
-    if payload.auto_start:
-        worker.enqueue(task_id)
+    worker.enqueue(task_id)
     return database.get_task(task_id)
 
 
@@ -314,8 +336,7 @@ def upload_local_video(
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
 
-    if auto_start:
-        _ensure_runtime_ready()
+    _ensure_runtime_ready()
     original_name = Path(file.filename or "").name.strip()
     stored_name = _clean_upload_filename(original_name)
     task_id = str(uuid.uuid4())
@@ -345,11 +366,10 @@ def upload_local_video(
         url,
         task_id=task_id,
         execution_mode=normalize_execution_mode(execution_mode),
-        auto_start=auto_start,
+        auto_start=True,
     )
     database.update_task(task_id, title=Path(original_name).stem)
-    if auto_start:
-        worker.enqueue(task_id)
+    worker.enqueue(task_id)
     return database.get_task(task_id)
 
 
@@ -390,10 +410,15 @@ def task_detail(task_id: str) -> dict:
 @app.post("/api/tasks/requeue-all")
 def requeue_all_tasks() -> dict:
     _ensure_runtime_ready()
-    task_ids = database.list_requeueable_task_ids()
-    for task_id in task_ids:
-        database.queue_task_for_continue(task_id)
+    tasks = database.list_requeueable_tasks()
+    for task in tasks:
+        task_id = task["id"]
+        if task["status"] == "failed":
+            database.reset_failed_for_resume(task_id)
+        else:
+            database.queue_task_for_continue(task_id)
         worker.enqueue(task_id)
+    task_ids = [task["id"] for task in tasks]
     return {"queued": len(task_ids), "task_ids": task_ids}
 
 

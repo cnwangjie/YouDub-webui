@@ -319,44 +319,78 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           </CardHeader>
           <CardContent>
             {task ? (
-              <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-[120px_1fr]">
-                {task.title ? (
-                  <>
-                    <dt className="text-muted-foreground">{t.task.title}</dt>
-                    <dd className="break-words font-medium">{task.title}</dd>
-                  </>
-                ) : null}
-                <dt className="text-muted-foreground">URL</dt>
-                <dd className="break-all">
-                  <a href={task.url} target="_blank" rel="noreferrer" className="text-[#00aeec] hover:underline">
-                    {task.url}
-                  </a>
-                </dd>
-                <dt className="text-muted-foreground">{t.task.taskId}</dt>
-                <dd className="font-mono text-xs">{task.id}</dd>
-                <dt className="text-muted-foreground">{t.task.created}</dt>
-                <dd>{formatTime(task.created_at)}</dd>
-                {task.duration_seconds ? (
-                  <>
-                    <dt className="text-muted-foreground">{t.task.duration}</dt>
-                    <dd>{formatVideoDuration(task.duration_seconds)}</dd>
-                  </>
-                ) : null}
-                <dt className="text-muted-foreground">{t.task.started}</dt>
-                <dd>{formatTime(task.started_at)}</dd>
-                <dt className="text-muted-foreground">{t.task.completed}</dt>
-                <dd>{formatTime(task.completed_at) || "—"}</dd>
-                <dt className="text-muted-foreground">{t.task.executionMode}</dt>
-                <dd>
-                  {task.execution_mode === "manual" ? t.task.executionManual : t.task.executionAuto}
-                </dd>
-                {task.session_path ? (
-                  <>
-                    <dt className="text-muted-foreground">{t.task.session}</dt>
-                    <dd className="break-all text-xs text-muted-foreground">{task.session_path}</dd>
-                  </>
-                ) : null}
-              </dl>
+              <div className="grid gap-4 md:grid-cols-[220px_1fr]">
+                {task.thumbnail_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={task.thumbnail_url}
+                    alt={task.title || task.id}
+                    className="aspect-video w-full rounded-md border border-border object-cover"
+                  />
+                ) : (
+                  <div className="hidden aspect-video items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground md:flex">
+                    {t.task.cover}
+                  </div>
+                )}
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-[120px_1fr]">
+                  {task.title ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.title}</dt>
+                      <dd className="break-words font-medium">{task.title}</dd>
+                    </>
+                  ) : null}
+                  {task.source_author ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.author}</dt>
+                      <dd className="break-words">{task.source_author}</dd>
+                    </>
+                  ) : null}
+                  {task.source_published_at ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.publishedAt}</dt>
+                      <dd>{task.source_published_at}</dd>
+                    </>
+                  ) : null}
+                  <dt className="text-muted-foreground">URL</dt>
+                  <dd className="break-all">
+                    <a href={task.url} target="_blank" rel="noreferrer" className="text-[#00aeec] hover:underline">
+                      {task.url}
+                    </a>
+                  </dd>
+                  <dt className="text-muted-foreground">{t.task.taskId}</dt>
+                  <dd className="font-mono text-xs">{task.id}</dd>
+                  <dt className="text-muted-foreground">{t.task.created}</dt>
+                  <dd>{formatTime(task.created_at)}</dd>
+                  {task.duration_seconds ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.duration}</dt>
+                      <dd>{formatVideoDuration(task.duration_seconds)}</dd>
+                    </>
+                  ) : null}
+                  <dt className="text-muted-foreground">{t.task.started}</dt>
+                  <dd>{formatTime(task.started_at)}</dd>
+                  <dt className="text-muted-foreground">{t.task.completed}</dt>
+                  <dd>{formatTime(task.completed_at) || "—"}</dd>
+                  <dt className="text-muted-foreground">{t.task.executionMode}</dt>
+                  <dd>
+                    {task.execution_mode === "manual" ? t.task.executionManual : t.task.executionAuto}
+                  </dd>
+                  {task.session_path ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.session}</dt>
+                      <dd className="break-all text-xs text-muted-foreground">{task.session_path}</dd>
+                    </>
+                  ) : null}
+                  {task.source_description ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.sourceDescription}</dt>
+                      <dd className="line-clamp-8 whitespace-pre-wrap text-muted-foreground">
+                        {task.source_description}
+                      </dd>
+                    </>
+                  ) : null}
+                </dl>
+              </div>
             ) : (
               <div className="py-6 text-center text-sm text-muted-foreground">{t.task.loading}</div>
             )}

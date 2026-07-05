@@ -39,6 +39,10 @@ def init_db() -> None:
               id TEXT PRIMARY KEY,
               url TEXT NOT NULL,
               title TEXT,
+              source_author TEXT,
+              source_description TEXT,
+              source_published_at TEXT,
+              thumbnail_url TEXT,
               status TEXT NOT NULL,
               current_stage TEXT,
               session_path TEXT,
@@ -92,6 +96,14 @@ def init_db() -> None:
             )
         if "duration_seconds" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN duration_seconds INTEGER")
+        if "source_author" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_author TEXT")
+        if "source_description" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_description TEXT")
+        if "source_published_at" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_published_at TEXT")
+        if "thumbnail_url" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN thumbnail_url TEXT")
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
             conn.execute("ALTER TABLE task_stages ADD COLUMN progress INTEGER")
@@ -112,10 +124,18 @@ def backfill_titles_from_metadata() -> None:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, session_path, title, duration_seconds
+            SELECT id, session_path, title, source_author, source_description,
+                   source_published_at, thumbnail_url, duration_seconds
             FROM tasks
             WHERE session_path IS NOT NULL
-              AND ((title IS NULL OR title = '') OR duration_seconds IS NULL)
+              AND (
+                (title IS NULL OR title = '')
+                OR (source_author IS NULL OR source_author = '')
+                OR (source_description IS NULL OR source_description = '')
+                OR (source_published_at IS NULL OR source_published_at = '')
+                OR (thumbnail_url IS NULL OR thumbnail_url = '')
+                OR duration_seconds IS NULL
+              )
             """
         ).fetchall()
     for row in rows:
@@ -131,6 +151,23 @@ def backfill_titles_from_metadata() -> None:
         updates: dict[str, Any] = {}
         if title and not (row["title"] or "").strip():
             updates["title"] = title
+        author = str(info.get("uploader") or info.get("channel") or info.get("creator") or "").strip()
+        if author and not (row["source_author"] or "").strip():
+            updates["source_author"] = author
+        description = str(info.get("description") or "").strip()
+        if description and not (row["source_description"] or "").strip():
+            updates["source_description"] = description
+        upload_date = str(info.get("upload_date") or "").strip()
+        published_at = ""
+        if len(upload_date) == 8 and upload_date.isdigit():
+            published_at = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+        else:
+            published_at = str(info.get("release_date") or info.get("modified_date") or "").strip()
+        if published_at and not (row["source_published_at"] or "").strip():
+            updates["source_published_at"] = published_at
+        thumbnail_url = str(info.get("thumbnail") or "").strip()
+        if thumbnail_url and not (row["thumbnail_url"] or "").strip():
+            updates["thumbnail_url"] = thumbnail_url
         if duration is not None and row["duration_seconds"] is None:
             updates["duration_seconds"] = duration
         if not updates:
@@ -183,6 +220,12 @@ def create_task(
     *,
     execution_mode: str = DEFAULT_EXECUTION_MODE,
     auto_start: bool = True,
+    title: str | None = None,
+    source_author: str | None = None,
+    source_description: str | None = None,
+    source_published_at: str | None = None,
+    thumbnail_url: str | None = None,
+    duration_seconds: int | None = None,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
@@ -191,10 +234,26 @@ def create_task(
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO tasks (id, url, status, current_stage, created_at, execution_mode)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (
+              id, url, title, source_author, source_description, source_published_at,
+              thumbnail_url, duration_seconds, status, current_stage, created_at, execution_mode
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (new_id, url, status, STAGES[0].name, created_at, mode),
+            (
+                new_id,
+                url,
+                title,
+                source_author,
+                source_description,
+                source_published_at,
+                thumbnail_url,
+                duration_seconds,
+                status,
+                STAGES[0].name,
+                created_at,
+                mode,
+            ),
         )
         conn.executemany(
             """
@@ -232,7 +291,8 @@ def latest_task_id() -> str | None:
 
 
 TASK_SUMMARY_COLUMNS = (
-    "id, url, title, status, current_stage, final_video_path, duration_seconds, error_message, "
+    "id, url, title, source_author, source_published_at, thumbnail_url, "
+    "status, current_stage, session_path, final_video_path, duration_seconds, error_message, "
     "created_at, started_at, completed_at, execution_mode"
 )
 
@@ -275,7 +335,62 @@ def list_tasks(limit: int = 100) -> list[dict[str, Any]]:
             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+        tasks = [dict(row) for row in rows]
+        _attach_stages(conn, tasks)
+    return tasks
+
+
+def _attach_stages(conn: sqlite3.Connection, tasks: list[dict[str, Any]]) -> None:
+    if not tasks:
+        return
+    task_ids = [task["id"] for task in tasks]
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task_id, name, label, status, progress, started_at, completed_at,
+               last_message, error_message
+        FROM task_stages
+        WHERE task_id IN ({placeholders})
+        ORDER BY
+          CASE name
+            WHEN 'download' THEN 1
+            WHEN 'separate' THEN 2
+            WHEN 'asr' THEN 3
+            WHEN 'asr_fix' THEN 4
+            WHEN 'translate' THEN 5
+            WHEN 'split_audio' THEN 6
+            WHEN 'tts' THEN 7
+            WHEN 'merge_audio' THEN 8
+            WHEN 'merge_video' THEN 9
+            ELSE 99
+          END
+        """,
+        task_ids,
+    ).fetchall()
+    stages_by_task: dict[str, list[dict[str, Any]]] = {task_id: [] for task_id in task_ids}
+    for row in rows:
+        stages_by_task[row["task_id"]].append(dict(row))
+    for task in tasks:
+        task["stages"] = stages_by_task.get(task["id"], [])
+        task["bilibili_publish_status"] = _bilibili_publish_status(task)
+
+
+def _bilibili_publish_status(task: dict[str, Any]) -> str:
+    session_path = str(task.get("session_path") or "")
+    if session_path:
+        status_path = Path(session_path) / "metadata" / "bilibili_publish.json"
+        if status_path.exists():
+            try:
+                payload = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            status = str(payload.get("status") or "").strip()
+            if status in {"draft", "running", "succeeded", "failed"}:
+                return status
+    final_video = str(task.get("final_video_path") or "")
+    if final_video:
+        return "draft"
+    return "unpublished"
 
 
 def list_tasks_page(
@@ -303,11 +418,11 @@ def list_tasks_page(
             "OR LOWER(id) LIKE ?)"
         )
         params.extend([pattern, pattern, pattern])
-    if status != "all":
+    if status == "incomplete":
+        where_parts.append("status != 'succeeded'")
+    elif status != "all":
         where_parts.append("status = ?")
         params.append(status)
-    elif hide_completed:
-        where_parts.append("status != 'succeeded'")
     if execution_mode != "all":
         where_parts.append("execution_mode = ?")
         params.append(execution_mode)
@@ -325,9 +440,11 @@ def list_tasks_page(
             f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
             [*params, page_size, offset],
         ).fetchall()
+        tasks = [dict(row) for row in rows]
+        _attach_stages(conn, tasks)
 
     return {
-        "tasks": [dict(row) for row in rows],
+        "tasks": tasks,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -404,16 +521,20 @@ def queue_task_for_continue(task_id: str) -> None:
         )
 
 
-def list_requeueable_task_ids() -> list[str]:
+def list_requeueable_tasks() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT id FROM tasks
-            WHERE status IN ('paused', 'cancelled')
+            SELECT id, status FROM tasks
+            WHERE status IN ('paused', 'cancelled', 'failed')
             ORDER BY created_at ASC, rowid ASC
             """
         ).fetchall()
-    return [row["id"] for row in rows]
+    return [dict(row) for row in rows]
+
+
+def list_requeueable_task_ids() -> list[str]:
+    return [task["id"] for task in list_requeueable_tasks()]
 
 
 def cancel_task(task_id: str, message: str = "Task cancelled by user.") -> None:

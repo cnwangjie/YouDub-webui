@@ -3,15 +3,17 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react"
-import { ChevronLeft, ChevronRight, Pause, Play, Search, Upload } from "lucide-react"
+import { ChevronLeft, ChevronRight, Pause, Play, Plus, Search, Upload } from "lucide-react"
 
 import {
   ExecutionMode,
   LocalDirection,
+  TaskPublishStatus,
   TaskListExecutionMode,
   TaskListResponse,
   TaskListSort,
   TaskListStatus,
+  TaskStage,
   TaskSummary,
   WorkerStatus,
   createTask,
@@ -35,7 +37,6 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
@@ -68,6 +69,93 @@ function activeCount(tasks: TaskSummary[]) {
   return tasks.filter((t) => isActive(t.status)).length
 }
 
+function stageDotClass(status: string) {
+  if (status === "succeeded") return "border-[#00aeec] bg-[#00aeec]"
+  if (status === "running") return "border-[#fb7299] bg-[#fb7299]"
+  if (status === "failed") return "border-[#ff0033] bg-[#ff0033]"
+  return "border-zinc-300 bg-white"
+}
+
+function publishBadgeClass(status: TaskPublishStatus) {
+  if (status === "succeeded") return "bg-[#00aeec]/10 text-[#008ac0] border-transparent"
+  if (status === "running") return "bg-[#fb7299]/15 text-[#c2185b] border-transparent"
+  if (status === "failed") return "bg-[#ff0033]/10 text-[#ff0033] border-transparent"
+  if (status === "draft") return "bg-amber-100 text-amber-800 border-transparent"
+  return "bg-zinc-100 text-zinc-600 border-transparent"
+}
+
+function publishStatusLabel(status: TaskPublishStatus, t: ReturnType<typeof useI18n>["t"]) {
+  if (status === "succeeded") return t.home.publishSucceeded
+  if (status === "running") return t.home.publishRunning
+  if (status === "failed") return t.home.publishFailed
+  if (status === "draft") return t.home.publishDraft
+  return t.home.publishUnpublished
+}
+
+function TaskStageDots({
+  stages,
+  stageLabel,
+  statusLabel,
+  currentStage,
+}: {
+  stages: TaskStage[]
+  stageLabel: (stage: string) => string
+  statusLabel: (status?: string) => string
+  currentStage: string | null
+}) {
+  if (!stages.length) return null
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5 px-0.5 py-0.5">
+        {stages.map((stage) => (
+          <span
+            key={stage.name}
+            title={`${stageLabel(stage.name)} · ${statusLabel(stage.status)}`}
+            className={`size-2.5 shrink-0 rounded-full border ${stageDotClass(stage.status)}`}
+          />
+        ))}
+      </div>
+      {currentStage && currentStage !== "done" ? (
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          {stageLabel(currentStage)}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+function TaskProgressOrPublish({
+  item,
+  stageLabel,
+  statusLabel,
+  t,
+}: {
+  item: TaskSummary
+  stageLabel: (stage: string) => string
+  statusLabel: (status?: string) => string
+  t: ReturnType<typeof useI18n>["t"]
+}) {
+  if (item.status === "succeeded") {
+    return (
+      <div className="mt-1.5 flex h-4 items-center">
+        <Badge className={publishBadgeClass(item.bilibili_publish_status)}>
+          {publishStatusLabel(item.bilibili_publish_status, t)}
+        </Badge>
+      </div>
+    )
+  }
+  return (
+    <div className="h-4">
+      <TaskStageDots
+        stages={item.stages || []}
+        stageLabel={stageLabel}
+        statusLabel={statusLabel}
+        currentStage={item.current_stage}
+      />
+    </div>
+  )
+}
+
 function selectedLabel<T extends string>(options: { value: T; label: string }[], value: T) {
   return options.find((option) => option.value === value)?.label || value
 }
@@ -93,17 +181,16 @@ export default function Home() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
-  const [autoStart, setAutoStart] = useState(true)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [taskPage, setTaskPage] = useState(1)
   const [taskPageSize, setTaskPageSize] = useState(20)
   const [taskQuery, setTaskQuery] = useState("")
-  const [taskStatus, setTaskStatus] = useState<TaskListStatus>("all")
+  const [taskStatus, setTaskStatus] = useState<TaskListStatus>("incomplete")
   const [taskExecutionMode, setTaskExecutionMode] = useState<TaskListExecutionMode>("all")
   const [taskSort, setTaskSort] = useState<TaskListSort>("created_asc")
   const [error, setError] = useState("")
-  const [submitting, setSubmitting] = useState(false)
+  const [submittingAction, setSubmittingAction] = useState<"open" | "next" | null>(null)
   const [requeueingAll, setRequeueingAll] = useState(false)
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null)
   const [togglingWorker, setTogglingWorker] = useState(false)
@@ -119,6 +206,7 @@ export default function Home() {
   ]
 
   const statusOptions: { value: TaskListStatus; label: string }[] = [
+    { value: "incomplete", label: t.home.incompleteStatuses },
     { value: "all", label: t.home.allStatuses },
     { value: "queued", label: statusLabel("queued") },
     { value: "running", label: statusLabel("running") },
@@ -170,7 +258,6 @@ export default function Home() {
         status: taskStatus,
         execution_mode: taskExecutionMode,
         sort: taskSort,
-        hide_completed: taskStatus === "all",
       })
     applyTaskList(result)
     refreshWorkerStatus().catch(() => undefined)
@@ -189,7 +276,6 @@ export default function Home() {
             status: taskStatus,
             execution_mode: taskExecutionMode,
             sort: taskSort,
-            hide_completed: taskStatus === "all",
           }),
           getWorkerStatus(),
         ])
@@ -227,11 +313,13 @@ export default function Home() {
     setError("")
     const submittedUrl = youtubeUrl.trim() || bilibiliUrl.trim()
     if (!submittedUrl && !localFile) return
-    setSubmitting(true)
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
+    const action = submitter?.value === "next" ? "next" : "open"
+    setSubmittingAction(action)
     try {
       const created = localFile
-        ? await uploadLocalTask(localFile, localDirection, localSubtitleFile, executionMode, autoStart)
-        : await createTask(submittedUrl, executionMode, autoStart)
+        ? await uploadLocalTask(localFile, localDirection, localSubtitleFile, executionMode, true)
+        : await createTask(submittedUrl, executionMode, true)
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
@@ -243,11 +331,13 @@ export default function Home() {
         subtitleInputRef.current.value = ""
       }
       refreshTasks().catch(() => undefined)
-      router.push(`/tasks/${created.id}`)
+      if (action === "open") {
+        router.push(`/tasks/${created.id}`)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t.home.createError)
     } finally {
-      setSubmitting(false)
+      setSubmittingAction(null)
     }
   }
 
@@ -281,12 +371,12 @@ export default function Home() {
   const queued = activeCount(tasks)
   const hasUrl = Boolean(youtubeUrl.trim() || bilibiliUrl.trim())
   const hasLocalFile = Boolean(localFile)
-  const canSubmit = Boolean((hasUrl || hasLocalFile) && !submitting)
+  const canSubmit = Boolean((hasUrl || hasLocalFile) && !submittingAction)
   const totalPages = Math.max(1, Math.ceil(taskTotal / taskPageSize))
   const displayPage = Math.min(taskPage, totalPages)
   const pageStart = taskTotal === 0 ? 0 : (displayPage - 1) * taskPageSize + 1
   const pageEnd = Math.min(taskTotal, displayPage * taskPageSize)
-  const hasTaskFilters = Boolean(taskQuery.trim()) || taskStatus !== "all" || taskExecutionMode !== "all"
+  const hasTaskFilters = Boolean(taskQuery.trim()) || taskStatus !== "incomplete" || taskExecutionMode !== "all"
 
   return (
     <main className="min-h-screen bg-[linear-gradient(135deg,#fff5f5_0%,#f2fbff_48%,#fff4fa_100%)] text-foreground">
@@ -387,15 +477,6 @@ export default function Home() {
                   </SelectContent>
                 </Select>
               </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  className="size-4 rounded border-input accent-[#00aeec]"
-                  checked={autoStart}
-                  onChange={(event) => setAutoStart(event.target.checked)}
-                />
-                <span>{t.home.autoStartLabel}</span>
-              </label>
               <div className="flex items-center justify-between gap-3">
                 {queued > 0 ? (
                   <p className="text-xs text-muted-foreground">
@@ -404,10 +485,16 @@ export default function Home() {
                 ) : (
                   <span />
                 )}
-                <Button type="submit" disabled={!canSubmit}>
-                  {hasLocalFile ? <Upload className="size-4" /> : <Play className="size-4" />}
-                  {submitting ? t.home.submitting : t.home.createTask}
-                </Button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button type="submit" name="intent" value="next" variant="outline" disabled={!canSubmit}>
+                    <Plus className="size-4" />
+                    {submittingAction === "next" ? t.home.submitting : t.home.createAndNext}
+                  </Button>
+                  <Button type="submit" name="intent" value="open" disabled={!canSubmit}>
+                    {hasLocalFile ? <Upload className="size-4" /> : <Play className="size-4" />}
+                    {submittingAction === "open" ? t.home.submitting : t.home.createTask}
+                  </Button>
+                </div>
               </div>
             </form>
 
@@ -569,35 +656,41 @@ export default function Home() {
                 {hasTaskFilters ? t.home.noMatchingTasks : t.home.empty}
               </div>
             ) : (
-              <ScrollArea className="max-h-[56dvh] overflow-hidden">
-                <ul className="flex flex-col">
-                  {tasks.map((item) => (
-                    <li key={item.id} className="border-b border-border/60 last:border-b-0">
-                      <Link
-                        href={`/tasks/${item.id}`}
-                        className="flex w-full items-center gap-3 px-6 py-3 text-sm transition-colors hover:bg-muted/60"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-left font-medium text-zinc-900">
-                            {item.title || shortUrl(item.url)}
-                          </p>
-                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                            <Badge className={statusBadgeClass(item.status)}>{statusLabel(item.status)}</Badge>
-                            <span>{formatTime(item.created_at)}</span>
-                            {isActive(item.status) && item.current_stage ? (
-                              <span>· {stageLabel(item.current_stage)}</span>
-                            ) : null}
-                            {isAwaitingAction(item.status) ? (
-                              <span>· {t.status.paused}</span>
-                            ) : null}
-                          </div>
+              <ul className="flex flex-col">
+                {tasks.map((item) => (
+                  <li key={item.id} className="border-b border-border/60 last:border-b-0">
+                    <Link
+                      href={`/tasks/${item.id}`}
+                      className="flex w-full items-center gap-3 px-6 py-2.5 text-sm transition-colors hover:bg-muted/60"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-left font-medium text-zinc-900">
+                          {item.title || shortUrl(item.url)}
+                        </p>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                          <Badge className={statusBadgeClass(item.status)}>{statusLabel(item.status)}</Badge>
+                          {item.source_author ? <span>{item.source_author}</span> : null}
+                          {item.source_published_at ? <span>· {item.source_published_at}</span> : null}
+                          <span>{formatTime(item.created_at)}</span>
+                          {isActive(item.status) && item.current_stage ? (
+                            <span>· {stageLabel(item.current_stage)}</span>
+                          ) : null}
+                          {isAwaitingAction(item.status) ? (
+                            <span>· {t.status.paused}</span>
+                          ) : null}
                         </div>
-                        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </ScrollArea>
+                        <TaskProgressOrPublish
+                          item={item}
+                          stageLabel={stageLabel}
+                          statusLabel={statusLabel}
+                          t={t}
+                        />
+                      </div>
+                      <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
             )}
 
             {taskTotal > 0 ? (

@@ -402,12 +402,19 @@ class PipelineRunner:
             session, info = download_video(task["url"], WORKFOLDER, source, proxy_port)
         self.artifacts.session = session
         self.artifacts.video_file = session / "media" / "video_source.mp4"
-        title = (info.get("title") or "").strip() or None
+        from .adapters.ytdlp import public_video_info
+
+        metadata = public_video_info(info)
+        title = metadata["title"] or None
         database.update_task(
             self.task_id,
             session_path=str(session),
             title=title,
-            duration_seconds=_duration_seconds(info.get("duration")),
+            source_author=metadata["source_author"] or None,
+            source_description=metadata["source_description"] or None,
+            source_published_at=metadata["source_published_at"] or None,
+            thumbnail_url=metadata["thumbnail_url"] or None,
+            duration_seconds=metadata["duration_seconds"],
         )
         self.stage_message("download", f"[{source.name}] {title or 'Downloaded'} -> {session}")
 

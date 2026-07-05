@@ -87,6 +87,49 @@ def _session_path(workfolder: Path, info: dict[str, Any]) -> Path:
     return workfolder / uploader / f"{title}__{video_id}"
 
 
+def _published_at(info: dict[str, Any]) -> str:
+    upload_date = str(info.get("upload_date") or "").strip()
+    if len(upload_date) == 8 and upload_date.isdigit():
+        return f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+    return str(info.get("release_date") or info.get("modified_date") or "").strip()
+
+
+def public_video_info(info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": str(info.get("title") or "").strip(),
+        "source_author": str(
+            info.get("uploader") or info.get("channel") or info.get("creator") or ""
+        ).strip(),
+        "source_description": str(info.get("description") or "").strip(),
+        "source_published_at": _published_at(info),
+        "thumbnail_url": str(info.get("thumbnail") or "").strip(),
+        "duration_seconds": _duration_seconds(info.get("duration")),
+    }
+
+
+def _duration_seconds(value: Any) -> int | None:
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return round(duration)
+
+
+def fetch_video_info(url: str, source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
+    video_id = extract_video_id(url)
+    _ensure_cookie(source)
+    info_opts = _ydl_base(source, proxy_port)
+    with yt_dlp.YoutubeDL(info_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        info = ydl.sanitize_info(info)
+
+    if str(info.get("id", video_id)) != video_id:
+        raise ValueError("The resolved video id does not match the submitted URL.")
+    return info
+
+
 def _is_format_unavailable(exc: Exception) -> bool:
     return "Requested format is not available" in str(exc)
 
@@ -128,14 +171,7 @@ def _download_with_format_candidates(
 def download_video(
     url: str, workfolder: Path, source: SourceConfig, proxy_port: str = ""
 ) -> tuple[Path, dict[str, Any]]:
-    video_id = extract_video_id(url)
-    _ensure_cookie(source)
-    info_opts = _ydl_base(source, proxy_port)
-    with yt_dlp.YoutubeDL(info_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    if str(info.get("id", video_id)) != video_id:
-        raise ValueError("The resolved video id does not match the submitted URL.")
+    info = fetch_video_info(url, source, proxy_port)
 
     session = _session_path(workfolder, info)
     media_dir = session / "media"
@@ -145,7 +181,7 @@ def download_video(
 
     video_file = media_dir / "video_source.mp4"
     metadata_file = metadata_dir / "ytdlp_info.json"
-    metadata_file.write_text(json.dumps(ydl.sanitize_info(info), ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if video_file.exists() and video_file.stat().st_size > 0:
         return session, info
