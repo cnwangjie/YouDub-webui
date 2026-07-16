@@ -14,6 +14,7 @@ import {
   TaskListSort,
   TaskListStatus,
   TaskStage,
+  TaskStats,
   TaskSummary,
   WorkerStatus,
   createTask,
@@ -170,6 +171,20 @@ function pageIndexText(language: string, page: number, totalPages: number) {
   return `Page ${page} / ${totalPages}`
 }
 
+function formatDurationCompact(seconds: number, language: string) {
+  const total = Math.max(0, Math.round(seconds || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (language === "zh") {
+    if (hours) return `${hours}小时${minutes ? `${minutes}分` : ""}`
+    if (minutes) return `${minutes}分钟`
+    return `${total % 60}秒`
+  }
+  if (hours) return `${hours}h ${minutes ? `${minutes}m` : ""}`.trim()
+  if (minutes) return `${minutes}m`
+  return `${total % 60}s`
+}
+
 export default function Home() {
   const router = useRouter()
   const { activeTasksText, language, stageLabel, statusLabel, t } = useI18n()
@@ -182,6 +197,7 @@ export default function Home() {
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
   const [tasks, setTasks] = useState<TaskSummary[]>([])
+  const [taskStats, setTaskStats] = useState<TaskStats | null>(null)
   const [taskTotal, setTaskTotal] = useState(0)
   const [taskPage, setTaskPage] = useState(1)
   const [taskPageSize, setTaskPageSize] = useState(20)
@@ -237,6 +253,7 @@ export default function Home() {
 
   function applyTaskList(result: TaskListResponse) {
     const lastPage = Math.max(1, Math.ceil(result.total / result.page_size))
+    setTaskStats(result.stats)
     setTaskTotal(result.total)
     if (result.total > 0 && result.tasks.length === 0 && result.page > lastPage) {
       setTasks([])
@@ -526,7 +543,46 @@ export default function Home() {
             </div>
           </CardHeader>
           <CardContent className="px-0">
-            <div className="border-b border-border/60 px-4 pb-4">
+            {taskStats ? (
+              <div className="grid gap-2 border-b border-border/60 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-6">
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsTotalTasks}</p>
+                  <p className="mt-1 text-lg font-semibold">{taskStats.total_tasks}</p>
+                </div>
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsIncompleteTasks}</p>
+                  <p className="mt-1 text-lg font-semibold">{taskStats.incomplete_tasks}</p>
+                </div>
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsPublishedTasks}</p>
+                  <p className="mt-1 text-lg font-semibold">{taskStats.published_tasks}</p>
+                </div>
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsProgress}</p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-[#00aeec]"
+                        style={{ width: `${Math.max(0, Math.min(100, taskStats.progress_percent))}%` }}
+                      />
+                    </div>
+                    <span className="text-sm font-semibold tabular-nums">{taskStats.progress_percent}%</span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {taskStats.stage_succeeded}/{taskStats.stage_total}
+                  </p>
+                </div>
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsVideoDuration}</p>
+                  <p className="mt-1 text-lg font-semibold">{formatDurationCompact(taskStats.total_video_duration_seconds, language)}</p>
+                </div>
+                <div className="rounded-md border bg-muted/25 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{t.home.statsElapsed}</p>
+                  <p className="mt-1 text-lg font-semibold">{formatDurationCompact(taskStats.total_elapsed_seconds, language)}</p>
+                </div>
+              </div>
+            ) : null}
+            <div className="border-b border-border/60 px-4 py-4">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_140px_140px_180px_120px]">
                 <div className="relative sm:col-span-2 lg:col-span-1">
                   <Label htmlFor="task-search" className="sr-only">

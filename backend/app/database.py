@@ -393,6 +393,79 @@ def _bilibili_publish_status(task: dict[str, Any]) -> str:
     return "unpublished"
 
 
+def _is_incomplete_task(task: dict[str, Any]) -> bool:
+    return task.get("status") != "succeeded" or task.get("bilibili_publish_status") != "succeeded"
+
+
+def _parse_iso_seconds(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _task_elapsed_seconds(task: dict[str, Any], now: datetime) -> int:
+    started = _parse_iso_seconds(task.get("started_at"))
+    if not started:
+        return 0
+    completed = _parse_iso_seconds(task.get("completed_at")) or now
+    seconds = int((completed - started).total_seconds())
+    return max(0, seconds)
+
+
+def _task_stats(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    by_status = {status: 0 for status in TASK_STATUSES}
+    by_publish_status = {
+        "unpublished": 0,
+        "draft": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+    }
+    stage_total = 0
+    stage_succeeded = 0
+    stage_running = 0
+    stage_failed = 0
+    for task in tasks:
+        task_status = str(task.get("status") or "")
+        if task_status in by_status:
+            by_status[task_status] += 1
+        publish_status = str(task.get("bilibili_publish_status") or "unpublished")
+        if publish_status in by_publish_status:
+            by_publish_status[publish_status] += 1
+        for stage in task.get("stages") or []:
+            stage_total += 1
+            stage_status = str(stage.get("status") or "")
+            if stage_status == "succeeded":
+                stage_succeeded += 1
+            elif stage_status == "running":
+                stage_running += 1
+            elif stage_status == "failed":
+                stage_failed += 1
+    progress_percent = round((stage_succeeded / stage_total) * 100) if stage_total else 0
+    return {
+        "total_tasks": len(tasks),
+        "incomplete_tasks": sum(1 for task in tasks if _is_incomplete_task(task)),
+        "succeeded_tasks": by_status["succeeded"],
+        "active_tasks": by_status["queued"] + by_status["running"],
+        "failed_tasks": by_status["failed"],
+        "published_tasks": by_publish_status["succeeded"],
+        "unpublished_tasks": len(tasks) - by_publish_status["succeeded"],
+        "total_video_duration_seconds": sum(int(task.get("duration_seconds") or 0) for task in tasks),
+        "total_elapsed_seconds": sum(_task_elapsed_seconds(task, now) for task in tasks),
+        "stage_total": stage_total,
+        "stage_succeeded": stage_succeeded,
+        "stage_running": stage_running,
+        "stage_failed": stage_failed,
+        "progress_percent": progress_percent,
+        "by_status": by_status,
+        "by_publish_status": by_publish_status,
+    }
+
+
 def list_tasks_page(
     *,
     page: int = 1,
@@ -406,48 +479,64 @@ def list_tasks_page(
     page = max(page, 1)
     page_size = max(page_size, 1)
     offset = (page - 1) * page_size
-    where_parts: list[str] = []
-    params: list[Any] = []
+    base_where_parts: list[str] = []
+    base_params: list[Any] = []
 
     needle = query.strip().lower()
     if needle:
         pattern = f"%{needle}%"
-        where_parts.append(
+        base_where_parts.append(
             "(LOWER(COALESCE(title, '')) LIKE ? "
             "OR LOWER(url) LIKE ? "
             "OR LOWER(id) LIKE ?)"
         )
-        params.extend([pattern, pattern, pattern])
-    if status == "incomplete":
-        where_parts.append("status != 'succeeded'")
-    elif status != "all":
+        base_params.extend([pattern, pattern, pattern])
+    needs_post_filter = status == "incomplete"
+    where_parts = list(base_where_parts)
+    params = list(base_params)
+    if status != "all" and not needs_post_filter:
         where_parts.append("status = ?")
         params.append(status)
     if execution_mode != "all":
+        base_where_parts.append("execution_mode = ?")
+        base_params.append(execution_mode)
         where_parts.append("execution_mode = ?")
         params.append(execution_mode)
 
+    base_where_sql = f" WHERE {' AND '.join(base_where_parts)}" if base_where_parts else ""
     where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
     order_sql = TASK_LIST_SORTS.get(sort, TASK_LIST_SORTS["created_desc"])
 
     with connect() as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM tasks{where_sql}",
-            params,
-        ).fetchone()[0]
-        rows = conn.execute(
-            f"SELECT {TASK_SUMMARY_COLUMNS} FROM tasks{where_sql} "
-            f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
-            [*params, page_size, offset],
+        stats_rows = conn.execute(
+            f"SELECT {TASK_SUMMARY_COLUMNS} FROM tasks{base_where_sql} ORDER BY {order_sql}",
+            base_params,
         ).fetchall()
-        tasks = [dict(row) for row in rows]
-        _attach_stages(conn, tasks)
+        stats_tasks = [dict(row) for row in stats_rows]
+        _attach_stages(conn, stats_tasks)
+
+        list_rows = conn.execute(
+            f"SELECT {TASK_SUMMARY_COLUMNS} FROM tasks{where_sql} ORDER BY {order_sql}",
+            params,
+        ).fetchall()
+        list_tasks = [dict(row) for row in list_rows]
+        _attach_stages(conn, list_tasks)
+
+    stats = _task_stats(stats_tasks)
+    filtered_tasks = (
+        [task for task in list_tasks if _is_incomplete_task(task)]
+        if needs_post_filter
+        else list_tasks
+    )
+    total = len(filtered_tasks)
+    tasks = filtered_tasks[offset : offset + page_size]
 
     return {
         "tasks": tasks,
         "total": total,
         "page": page,
         "page_size": page_size,
+        "stats": stats,
     }
 
 

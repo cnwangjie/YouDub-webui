@@ -290,11 +290,31 @@ export type TaskListParams = {
   hide_completed?: boolean
 }
 
+export type TaskStats = {
+  total_tasks: number
+  incomplete_tasks: number
+  succeeded_tasks: number
+  active_tasks: number
+  failed_tasks: number
+  published_tasks: number
+  unpublished_tasks: number
+  total_video_duration_seconds: number
+  total_elapsed_seconds: number
+  stage_total: number
+  stage_succeeded: number
+  stage_running: number
+  stage_failed: number
+  progress_percent: number
+  by_status: Record<TaskStatus, number>
+  by_publish_status: Record<TaskPublishStatus, number>
+}
+
 export type TaskListResponse = {
   tasks: TaskSummary[]
   total: number
   page: number
   page_size: number
+  stats: TaskStats
 }
 
 export type RequeueAllTasksResponse = {

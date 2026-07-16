@@ -404,7 +404,7 @@ def test_list_tasks_filters_status_and_execution_mode(monkeypatch, tmp_path):
     assert response.json()["total"] == 1
 
 
-def test_list_tasks_incomplete_status_excludes_succeeded(monkeypatch, tmp_path):
+def test_list_tasks_incomplete_status_includes_unpublished_succeeded(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     succeeded = make_history_task(
         "done-task",
@@ -423,12 +423,65 @@ def test_list_tasks_incomplete_status_excludes_succeeded(monkeypatch, tmp_path):
     )
     client = TestClient(main.app)
 
-    assert task_ids(client.get("/api/tasks?status=incomplete&sort=created_asc")) == [queued, failed]
+    assert task_ids(client.get("/api/tasks?status=incomplete&sort=created_asc")) == [succeeded, queued, failed]
     assert task_ids(client.get("/api/tasks?status=all&sort=created_asc")) == [
         succeeded,
         queued,
         failed,
     ]
+
+
+def test_list_tasks_stats(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    published = database.create_task(
+        "https://www.youtube.com/watch?v=publishedxx",
+        task_id="publishedxx",
+        duration_seconds=120,
+    )
+    unpublished = database.create_task(
+        "https://www.youtube.com/watch?v=unpublishxx",
+        task_id="unpublishxx",
+        duration_seconds=180,
+    )
+    queued = database.create_task(
+        "https://www.youtube.com/watch?v=queuedstats",
+        task_id="queuedstats",
+        duration_seconds=60,
+    )
+    database.update_task(
+        published,
+        status="succeeded",
+        started_at="2024-01-01T00:00:00+00:00",
+        completed_at="2024-01-01T00:10:00+00:00",
+    )
+    database.update_task(
+        unpublished,
+        status="succeeded",
+        started_at="2024-01-01T00:00:00+00:00",
+        completed_at="2024-01-01T00:20:00+00:00",
+    )
+    database.update_task(queued, status="queued")
+    session = config.WORKFOLDER / "uploader" / "publishedxx"
+    (session / "metadata").mkdir(parents=True)
+    (session / "metadata" / "bilibili_publish.json").write_text(
+        json.dumps({"status": "succeeded"}),
+        encoding="utf-8",
+    )
+    database.update_task(published, session_path=str(session))
+    client = TestClient(main.app)
+
+    response = client.get("/api/tasks?status=incomplete")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(task_ids(response)) == {unpublished, queued}
+    assert body["stats"]["total_tasks"] == 3
+    assert body["stats"]["incomplete_tasks"] == 2
+    assert body["stats"]["published_tasks"] == 1
+    assert body["stats"]["unpublished_tasks"] == 2
+    assert body["stats"]["total_video_duration_seconds"] == 360
+    assert body["stats"]["total_elapsed_seconds"] == 1800
+    assert body["stats"]["stage_total"] == 27
 
 
 def test_list_tasks_paginates_with_total(monkeypatch, tmp_path):
