@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import requests
 from openai import OpenAI
 
-from ..config import openai_image_defaults
+from ..config import bilibili_publish_defaults, openai_image_defaults
 from ..database import get_openai_settings
 from ..sources import SourceConfig
 from .openai_client import normalize_openai_base_url
@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 DESCRIPTION_LIMIT = 4000
 TAG_LIMIT = 40
+BILIBILI_TAG_LIMIT = 10
+BILIBILI_TITLE_LIMIT = 80
+BILIBILI_DESCRIPTION_LIMIT = 2000
 THUMBNAIL_TIMEOUT_SECONDS = 20
 IMAGE_EDIT_TIMEOUT_SECONDS = 180
 
@@ -85,6 +88,121 @@ def _thumbnail_url(info: dict[str, Any]) -> str:
         return ""
     candidates.sort(key=lambda item: int(item.get("width") or 0) * int(item.get("height") or 0))
     return str(candidates[-1]["url"]).strip()
+
+
+def _source_author(info: dict[str, Any]) -> str:
+    return str(info.get("uploader") or info.get("channel") or info.get("creator") or "").strip()
+
+
+def _source_url(info: dict[str, Any]) -> str:
+    return str(info.get("webpage_url") or info.get("original_url") or info.get("url") or "").strip()
+
+
+def _format_upload_date(info: dict[str, Any]) -> str:
+    raw_date = str(info.get("upload_date") or "").strip()
+    if len(raw_date) == 8 and raw_date.isdigit():
+        return f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+    return raw_date
+
+
+def _trim(value: str, limit: int) -> str:
+    value = value.strip()
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
+def _dedupe_tags(values: Any, limit: int) -> list[str]:
+    raw_values = values if isinstance(values, list) else []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        tag = str(item).strip()
+        normalized = tag.lower()
+        if not tag or normalized in seen:
+            continue
+        result.append(tag)
+        seen.add(normalized)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _partition_options_prompt(partition_options: list[dict[str, Any]]) -> str:
+    if not partition_options:
+        return "No Bilibili partition options are available. Return null for bilibili_tid."
+    rows = []
+    for item in partition_options[:120]:
+        try:
+            tid = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        label = str(item.get("label") or item.get("name") or tid).strip()
+        description = str(item.get("description") or "").strip()
+        rows.append({"id": tid, "label": label, "description": description})
+    if not rows:
+        return "No Bilibili partition options are available. Return null for bilibili_tid."
+    return json.dumps(rows, ensure_ascii=False)
+
+
+def _partition_label(partition_options: list[dict[str, Any]], tid: int | None) -> str:
+    if tid is None:
+        return ""
+    for item in partition_options:
+        try:
+            if int(item.get("id")) == tid:
+                return str(item.get("label") or item.get("name") or "").strip()
+        except (TypeError, ValueError):
+            continue
+    return ""
+
+
+def _default_publish_title(title: str, translated_title: str, author: str) -> str:
+    publish_title = translated_title or title or "YouDub video"
+    value = f"【中配】{publish_title} - {author}" if author else f"【中配】{publish_title}"
+    return _trim(value, BILIBILI_TITLE_LIMIT)
+
+
+def _default_publish_description(
+    *,
+    title: str,
+    author: str,
+    upload_date: str,
+    source_url: str,
+    translated_description: str,
+    description: str,
+) -> str:
+    header = [
+        f"原视频标题：{title}" if title else "",
+        f"原作者：{author}" if author else "",
+        f"发布日期：{upload_date}" if upload_date else "",
+        f"视频链接：{source_url}" if source_url else "",
+    ]
+    body = (translated_description or description).strip()
+    parts = [line for line in header if line]
+    if body:
+        parts.extend(["", body])
+    return _trim("\n".join(parts), BILIBILI_DESCRIPTION_LIMIT)
+
+
+def _publish_description_with_source_header(
+    *,
+    title: str,
+    author: str,
+    upload_date: str,
+    source_url: str,
+    body: str,
+    fallback_body: str,
+) -> str:
+    header = [
+        f"原视频标题：{title}" if title else "",
+        f"原作者：{author}" if author else "",
+        f"发布日期：{upload_date}" if upload_date else "",
+        f"视频链接：{source_url}" if source_url else "",
+    ]
+    parts = [line for line in header if line]
+    content = (body or fallback_body).strip()
+    if content:
+        parts.extend(["", content])
+    return _trim("\n".join(parts), BILIBILI_DESCRIPTION_LIMIT)
 
 
 def _thumbnail_suffix(url: str, content_type: str) -> str:
@@ -214,41 +332,63 @@ def _translate_prompt(
     title: str,
     description: str,
     tags: list[str],
+    author: str,
+    upload_date: str,
+    source_url: str,
+    partition_options: list[dict[str, Any]],
 ) -> str:
-    return f"""Translate and localize video metadata for publishing.
-Source language: {source.asr_language_name}
-Target language: {source.target_language_name}
+    return f"""您的任务是将YouTube视频元数据翻译并本地化到目标语言，以便在哔哩哔哩上发布，需注重本土化表达且内容易于传播。请仔细遵循以下说明：
 
-Return strict JSON with this schema:
+源语言：{source.asr_language_name}
+目标语言：{source.target_language_name}
+
+原始视频元数据：
+<original_title>{title}</original_title>
+<original_author>{author or "(unknown)"}</original_author>
+<original_publish_date>{upload_date or "(unknown)"}</original_publish_date>
+<source_video_link>{source_url or "(unknown)"}</source_video_link>
+<original_description>{description or "(none)"}</original_description>
+<original_tags>{json.dumps(tags, ensure_ascii=False)}</original_tags>
+
+哔哩哔哩分区选项：{_partition_options_prompt(partition_options)}
+标签限制：翻译后的标签（最多{TAG_LIMIT}个），哔哩哔哩标签（3-{BILIBILI_TAG_LIMIT}个）
+
+翻译与本地化规则：
+1. 保留产品名称、人名、URL、代号、型号和品牌名称，除非存在广泛接受的目标语言名称。
+2. 翻译后的标题：简洁、可发布，结合本土化表达增强传播性，不添加超出原意的过度标题党内容。
+3. 翻译后的描述：忠实于原文，保留有用的URL和换行，采用符合目标语言用户阅读习惯的表达以提升传播效果。
+4. 翻译后的标签：自然翻译，去除重复，结合本土化常用表述，最多{TAG_LIMIT}个标签。
+5. 哔哩哔哩标题：如果作者已知，使用格式“【中配】<翻译后的标题> - <原作者>”，标题需兼顾准确性与传播性。
+6. 哔哩哔哩描述：整体表述需符合哔哩哔哩用户偏好，增强内容传播力。去除原始描述中的推广链接、联系方式、商业化内容等信息。
+7. 哔哩哔哩标签：简洁、适合哔哩哔哩搜索，结合平台热门搜索词及本土化常用标签，3-{BILIBILI_TAG_LIMIT}个标签，无重复或话题标签。
+8. 哔哩哔哩tid：从提供的分区选项中选择；如果没有合适的选项或无选项，则返回null。
+
+仅输出严格的JSON，遵循以下模式：
 {{
-  "translated_title": "<natural target-language title>",
-  "translated_description": "<natural target-language description>",
-  "translated_tags": ["<target-language tag>", "..."]
+  "translated_title": "<自然的目标语言标题>",
+  "translated_description": "<自然的目标语言描述>",
+  "translated_tags": ["<目标语言标签>", "..."],
+  "bilibili_title": "【中配】<翻译后的标题> - <原作者>",
+  "bilibili_description": "<适合哔哩哔哩的描述>",
+  "bilibili_tags": ["<推荐的哔哩哔哩标签>", "..."],
+  "bilibili_tid": <推荐的分区ID或null>
 }}
-
-Rules:
-- Preserve product names, person names, URLs, code names, model names, and brand names unless a widely accepted target-language name exists.
-- Keep the title concise and publishable. Do not add clickbait beyond the original meaning.
-- Keep the description faithful. Preserve URLs and line breaks when useful.
-- Translate tags naturally. Remove duplicates. Keep at most {TAG_LIMIT} tags.
-- Output JSON only.
-
-Original title:
-{title}
-
-Original description:
-{description or "(none)"}
-
-Original tags:
-{json.dumps(tags, ensure_ascii=False)}
 """
 
 
-def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
+def localize_metadata(
+    session: Path,
+    source: SourceConfig,
+    partition_options: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     info = json.loads(metadata_file(session).read_text(encoding="utf-8"))
     title = str(info.get("title") or "").strip()
     description = _description(info)
     tags = _tags(info)
+    author = _source_author(info)
+    upload_date = _format_upload_date(info)
+    source_url = _source_url(info)
+    partition_options = partition_options or []
     thumbnail_url = _thumbnail_url(info)
     thumbnail_file = download_thumbnail(session, thumbnail_url)
 
@@ -259,15 +399,45 @@ def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
         client,
         model,
         "You output strict JSON only.",
-        _translate_prompt(source=source, title=title, description=description, tags=tags),
+        _translate_prompt(
+            source=source,
+            title=title,
+            description=description,
+            tags=tags,
+            author=author,
+            upload_date=upload_date,
+            source_url=source_url,
+            partition_options=partition_options,
+        ),
     )
     translated_title = str(translated.get("translated_title") or "").strip()
     translated_description = str(translated.get("translated_description") or "").strip()
-    translated_tags = [
-        str(item).strip()
-        for item in translated.get("translated_tags", [])
-        if str(item).strip()
-    ][:TAG_LIMIT]
+    translated_tags = _dedupe_tags(translated.get("translated_tags"), TAG_LIMIT)
+    bilibili_tags = _dedupe_tags(translated.get("bilibili_tags"), BILIBILI_TAG_LIMIT)
+    if not bilibili_tags:
+        bilibili_tags = _dedupe_tags(translated_tags or tags, BILIBILI_TAG_LIMIT)
+    try:
+        bilibili_tid = int(translated.get("bilibili_tid")) if translated.get("bilibili_tid") else None
+    except (TypeError, ValueError):
+        bilibili_tid = None
+    if bilibili_tid is None:
+        try:
+            bilibili_tid = int(bilibili_publish_defaults()["tid"])
+        except (TypeError, ValueError):
+            bilibili_tid = None
+    bilibili_title = _trim(
+        str(translated.get("bilibili_title") or "").strip()
+        or _default_publish_title(title, translated_title, author),
+        BILIBILI_TITLE_LIMIT,
+    )
+    bilibili_description = _publish_description_with_source_header(
+        title=title,
+        author=author,
+        upload_date=upload_date,
+        source_url=source_url,
+        body=str(translated.get("bilibili_description") or "").strip(),
+        fallback_body=translated_description or description,
+    )
     localized_thumbnail_file, thumbnail_translation = translate_thumbnail(
         session,
         thumbnail_file,
@@ -291,6 +461,14 @@ def localize_metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
         "translated_title": translated_title,
         "translated_description": translated_description,
         "translated_tags": translated_tags,
+        "bilibili": {
+            "title": bilibili_title,
+            "description": bilibili_description,
+            "tags": bilibili_tags,
+            "tid": bilibili_tid,
+            "partition_label": _partition_label(partition_options, bilibili_tid),
+            "source": source_url,
+        },
         "model": model,
         "base_url": normalize_openai_base_url(settings["base_url"]),
     }

@@ -3,7 +3,7 @@ function configuredApiBase(): string {
   if (configured) return configured.replace(/\/$/, "")
 
   if (typeof window === "undefined") return "http://127.0.0.1:8000"
-  return ""
+  return `http://${window.location.hostname}:8000`
 }
 
 export const API_BASE = configuredApiBase()
@@ -43,6 +43,7 @@ export type Task = {
   completed_at: string | null
   execution_mode: ExecutionMode
   stages: TaskStage[]
+  localized_metadata?: LocalizedMetadata | null
 }
 
 export type CookieInfo = {
@@ -101,6 +102,14 @@ export type LocalizedMetadata = {
   translated_title: string
   translated_description: string
   translated_tags: string[]
+  bilibili?: {
+    title: string
+    description: string
+    tags: string[]
+    tid: number | null
+    partition_label: string
+    source: string
+  }
   model: string
   base_url: string
 }

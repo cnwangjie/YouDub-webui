@@ -181,7 +181,7 @@ def test_generate_localized_metadata_uses_adapter(monkeypatch, tmp_path):
 
     from backend.app.adapters import metadata_localization
 
-    def fake_localize(session_path, source):
+    def fake_localize(session_path, source, partition_options=None):
         assert session_path == session
         return {
             "title": "Original",
@@ -321,6 +321,60 @@ def test_list_tasks_search_matches_title_url_and_id(monkeypatch, tmp_path):
     assert task_ids(client.get("/api/tasks?q=gamma-task")) == [gamma]
 
 
+def test_bilibili_records_draft_prefers_latest_localized_metadata(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=bilibidraft", task_id="bilibidraft")
+    session = config.WORKFOLDER / "uploader" / "title__bilibidraft"
+    metadata = session / "metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "bilibili_publish.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "title": "Old title",
+                "description": "Old description",
+                "tags": ["old"],
+                "source": "https://old.example",
+                "tid": 21,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (metadata / "localized_metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "Original",
+                "description": "",
+                "tags": [],
+                "thumbnail_file": "",
+                "translated_title": "Translated",
+                "translated_description": "",
+                "translated_tags": [],
+                "bilibili": {
+                    "title": "New title",
+                    "description": "New description",
+                    "tags": ["new"],
+                    "source": "https://new.example",
+                    "tid": 208,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    database.update_task(task_id, session_path=str(session))
+    client = TestClient(main.app)
+
+    response = client.get("/api/bilibili/publish/records")
+
+    assert response.status_code == 200
+    record = response.json()["records"][0]
+    assert record["title"] == "New title"
+    assert record["description"] == "New description"
+    assert record["tags"] == ["new"]
+    assert record["source"] == "https://new.example"
+    assert record["tid"] == 208
+
+
 def test_list_tasks_filters_status_and_execution_mode(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     target = make_history_task(
@@ -457,6 +511,38 @@ def test_task_detail_includes_stage_progress(monkeypatch, tmp_path):
     stages = {stage["name"]: stage for stage in response.json()["stages"]}
     assert stages["tts"]["progress"] == 42
     assert stages["tts"]["last_message"] == "Prepared 21/50 TTS clips"
+    assert response.json()["localized_metadata"] is None
+
+
+def test_task_detail_includes_localized_metadata(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=detailmeta1", task_id="detailmeta1")
+    session = config.WORKFOLDER / "uploader" / "title__detailmeta1"
+    metadata = session / "metadata"
+    media = session / "media"
+    metadata.mkdir(parents=True)
+    media.mkdir()
+    thumbnail = media / "thumbnail.jpg"
+    thumbnail.write_bytes(b"jpg")
+    payload = {
+        "title": "Original",
+        "description": "",
+        "tags": [],
+        "thumbnail_file": str(thumbnail),
+        "translated_title": "Translated",
+        "translated_description": "",
+        "translated_tags": [],
+    }
+    (metadata / "localized_metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+    database.update_task(task_id, session_path=str(session))
+    client = TestClient(main.app)
+
+    response = client.get(f"/api/tasks/{task_id}")
+
+    assert response.status_code == 200
+    localized = response.json()["localized_metadata"]
+    assert localized["translated_title"] == "Translated"
+    assert localized["thumbnail_api_url"] == f"/api/tasks/{task_id}/artifact/thumbnail"
 
 
 def test_delete_task_removes_session_log_and_record(monkeypatch, tmp_path):
@@ -585,7 +671,8 @@ def test_cors_origin_regex_allows_common_development_hosts(monkeypatch):
     assert regex.fullmatch("http://10.0.0.5:3000")
     assert regex.fullmatch("http://172.27.2.90:3000")
     assert regex.fullmatch("http://100.94.222.54:3000")
-    assert not regex.fullmatch("http://example.com:3000")
+    assert regex.fullmatch("http://alex:3000")
+    assert regex.fullmatch("http://example.com:3000")
     assert not regex.fullmatch("http://192.168.1.2:4000")
 
 

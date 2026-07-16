@@ -28,6 +28,8 @@ TAG_LIMIT = 10
 BILITV_APP_KEY = "4409e2ce8ffd12b8"
 BILITV_APP_SECRET = "59b43e04ad6965f34319062b478f83dd"
 BILIBILI_UPLOAD_MANAGER_URL = "https://member.bilibili.com/platform/upload-manager/article?page=1"
+PARTITION_CACHE_SECONDS = 3600
+_PARTITION_CACHE: dict[str, Any] = {"updated_at": 0.0, "rows": []}
 
 
 def _bilibili_headers() -> dict[str, str]:
@@ -359,7 +361,11 @@ class BilibiliPublisher:
 def _metadata(session: Path, source: SourceConfig) -> dict[str, Any]:
     payload = load_artifact(session)
     if payload is None:
-        payload = localize_metadata(session, source)
+        try:
+            partition_options = list_partitions()
+        except Exception:
+            partition_options = []
+        payload = localize_metadata(session, source, partition_options=partition_options)
     return payload
 
 
@@ -451,14 +457,21 @@ def _publish_fields(
     source_info = _source_metadata(session)
     config = bilibili_publish_defaults()
     overrides = overrides or {}
-    title = overrides.get("title") or _default_publish_title(metadata, source_info)
-    description = overrides.get("description") or _default_publish_description(metadata, source_info)
-    default_tags = metadata.get("translated_tags") or metadata.get("tags") or []
+    bilibili = metadata.get("bilibili") if isinstance(metadata.get("bilibili"), dict) else {}
+    title = overrides.get("title") or bilibili.get("title") or _default_publish_title(metadata, source_info)
+    description = (
+        overrides.get("description")
+        or bilibili.get("description")
+        or _default_publish_description(metadata, source_info)
+    )
+    default_tags = bilibili.get("tags") or metadata.get("translated_tags") or metadata.get("tags") or []
     override_tags = _split_tags(overrides.get("tags")) if overrides.get("tags") is not None else []
     tags = override_tags or _split_tags(default_tags)
-    source_url = str(overrides.get("source") or config["source"] or _source_url(source_info)).strip()
+    source_url = str(
+        overrides.get("source") or bilibili.get("source") or config["source"] or _source_url(source_info)
+    ).strip()
     try:
-        tid = int(overrides.get("tid") or config["tid"])
+        tid = int(overrides.get("tid") or bilibili.get("tid") or config["tid"])
     except (TypeError, ValueError):
         tid = int(config["tid"])
     return {
@@ -628,13 +641,23 @@ def _flatten_partition(item: dict[str, Any], parent_name: str = "") -> list[dict
     ]
 
 
-def list_partitions() -> list[dict[str, Any]]:
+def list_partitions(*, allow_stale: bool = True) -> list[dict[str, Any]]:
+    now = time.time()
+    cached_rows = _PARTITION_CACHE.get("rows") or []
+    cached_at = float(_PARTITION_CACHE.get("updated_at") or 0)
+    if cached_rows and now - cached_at < PARTITION_CACHE_SECONDS:
+        return list(cached_rows)
     credentials = database.get_bilibili_credentials()
     if credentials is None:
         raise RuntimeError("Bilibili credentials are not configured. Scan QR code first.")
-    publisher = BilibiliPublisher(credentials)
-    publisher.login_by_stored_credentials()
-    data = publisher.archive_pre().get("data") or {}
+    try:
+        publisher = BilibiliPublisher(credentials)
+        publisher.login_by_stored_credentials()
+        data = publisher.archive_pre().get("data") or {}
+    except Exception:
+        if allow_stale and cached_rows:
+            return list(cached_rows)
+        raise
     typelist = data.get("typelist")
     if not isinstance(typelist, list):
         return []
@@ -643,6 +666,7 @@ def list_partitions() -> list[dict[str, Any]]:
         if isinstance(item, dict):
             rows.extend(_flatten_partition(item))
     rows.sort(key=lambda row: row["label"])
+    _PARTITION_CACHE.update({"updated_at": now, "rows": rows})
     return rows
 
 
@@ -663,8 +687,11 @@ def list_publish_records() -> list[dict[str, Any]]:
             fields = _publish_fields(session, detect_source(task["url"])) if session and session.exists() else {}
         except Exception:
             fields = {}
+        publish_status = (status or {}).get("status") or "draft"
+        use_status_fields = publish_status in {"running", "succeeded"}
+        status_fields = status or {}
         title = (
-            (status or {}).get("title")
+            (status_fields.get("title") if use_status_fields else "")
             or fields.get("title")
             or task.get("title")
             or task.get("url")
@@ -674,7 +701,6 @@ def list_publish_records() -> list[dict[str, Any]]:
         thumbnail_api_url = ""
         if thumbnail_file and Path(thumbnail_file).exists():
             thumbnail_api_url = f"/api/tasks/{task['id']}/artifact/thumbnail"
-        publish_status = (status or {}).get("status") or "draft"
         record_type = "published" if publish_status == "succeeded" else "draft"
         result_ids = _result_ids((status or {}).get("result"))
         records.append(
@@ -687,10 +713,27 @@ def list_publish_records() -> list[dict[str, Any]]:
                 "message": (status or {}).get("message") or "",
                 "error": (status or {}).get("error") or "",
                 "title": str(title),
-                "description": (status or {}).get("description") or fields.get("description") or "",
-                "tags": (status or {}).get("tags") or fields.get("tags") or (metadata or {}).get("translated_tags") or [],
-                "source": (status or {}).get("source") or fields.get("source") or "",
-                "tid": int((status or {}).get("tid") or fields.get("tid") or bilibili_publish_defaults()["tid"]),
+                "description": (
+                    (status_fields.get("description") if use_status_fields else "")
+                    or fields.get("description")
+                    or ""
+                ),
+                "tags": (
+                    (status_fields.get("tags") if use_status_fields else [])
+                    or fields.get("tags")
+                    or (metadata or {}).get("translated_tags")
+                    or []
+                ),
+                "source": (
+                    (status_fields.get("source") if use_status_fields else "")
+                    or fields.get("source")
+                    or ""
+                ),
+                "tid": int(
+                    (status_fields.get("tid") if use_status_fields else None)
+                    or fields.get("tid")
+                    or bilibili_publish_defaults()["tid"]
+                ),
                 "thumbnail_api_url": thumbnail_api_url,
                 "final_video_available": final_video_available,
                 "created_at": task.get("created_at"),
@@ -717,6 +760,7 @@ def publish_to_bilibili(
         "title": fields["title"],
         "description": fields["description"],
         "tags": fields["tags"],
+        "tid": fields["tid"],
         "source": fields["source"],
         "video_file": str(video_file),
         "result": None,

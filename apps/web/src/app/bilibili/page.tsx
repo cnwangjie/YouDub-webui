@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import QRCode from "qrcode"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ExternalLink, Loader2, QrCode, RotateCw, Send } from "lucide-react"
 
 import {
@@ -13,6 +13,7 @@ import {
   clearBilibiliCredentials,
   createBilibiliQrCode,
   getBilibiliCredentialsStatus,
+  generateLocalizedMetadata,
   listBilibiliAccountArchives,
   listBilibiliPartitions,
   listBilibiliPublishRecords,
@@ -65,18 +66,14 @@ export default function BilibiliPage() {
   const [qrMessage, setQrMessage] = useState("")
   const [creatingQr, setCreatingQr] = useState(false)
   const [publishingTask, setPublishingTask] = useState<string | null>(null)
+  const [regeneratingTask, setRegeneratingTask] = useState<string | null>(null)
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  const load = async () => {
-    const [nextCredentials, nextRecords] = await Promise.all([
-      getBilibiliCredentialsStatus(),
-      listBilibiliPublishRecords(),
-    ])
-    setCredentials(nextCredentials)
-    setRecords(nextRecords.records)
+  const applyRecords = useCallback((nextRecords: BilibiliPublishRecord[]) => {
+    setRecords(nextRecords)
     setPublishEdits((current) => {
       const next = { ...current }
-      for (const record of nextRecords.records) {
+      for (const record of nextRecords) {
         if (next[record.task_id]) continue
         next[record.task_id] = {
           title: record.title || "",
@@ -88,6 +85,20 @@ export default function BilibiliPage() {
       }
       return next
     })
+  }, [])
+
+  const loadRecords = useCallback(async () => {
+    const nextRecords = await listBilibiliPublishRecords()
+    applyRecords(nextRecords.records)
+  }, [applyRecords])
+
+  const load = useCallback(async () => {
+    const [nextCredentials, nextRecords] = await Promise.all([
+      getBilibiliCredentialsStatus(),
+      listBilibiliPublishRecords(),
+    ])
+    setCredentials(nextCredentials)
+    applyRecords(nextRecords.records)
     if (nextCredentials.configured) {
       const [nextArchives, nextPartitions] = await Promise.all([
         listBilibiliAccountArchives({ page: 1, page_size: 20 }),
@@ -101,11 +112,11 @@ export default function BilibiliPage() {
       setAccountArchivesTotal(0)
       setPartitions([])
     }
-  }
+  }, [applyRecords])
 
   useEffect(() => {
     let cancelled = false
-    const run = async () => {
+    const loadInitial = async () => {
       try {
         await load()
         if (!cancelled) setError("")
@@ -115,13 +126,21 @@ export default function BilibiliPage() {
         if (!cancelled) setLoading(false)
       }
     }
-    run()
-    const interval = window.setInterval(run, 3000)
+    const refreshRecords = async () => {
+      try {
+        await loadRecords()
+        if (!cancelled) setError("")
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : t.bilibili.loadError)
+      }
+    }
+    loadInitial()
+    const interval = window.setInterval(refreshRecords, 3000)
     return () => {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [t.bilibili.loadError])
+  }, [load, loadRecords, t.bilibili.loadError])
 
   useEffect(() => {
     if (!qr?.authCode) return
@@ -236,6 +255,54 @@ export default function BilibiliPage() {
       setError(err instanceof Error ? err.message : t.bilibili.publishError)
     } finally {
       setPublishingTask(null)
+    }
+  }
+
+  const regenerateMetadata = async (taskId: string) => {
+    setRegeneratingTask(taskId)
+    setError("")
+    try {
+      const metadata = await generateLocalizedMetadata(taskId)
+      const bilibili = metadata.bilibili
+      const regeneratedEdit: PublishEdit | null = bilibili
+        ? {
+            title: bilibili.title || "",
+            description: bilibili.description || "",
+            source: bilibili.source || "",
+            tags: (bilibili.tags || []).join(", "),
+            tid: bilibili.tid ? String(bilibili.tid) : "",
+          }
+        : null
+      if (!regeneratedEdit) return
+      setPublishEdits((current) => {
+        return {
+          ...current,
+          [taskId]: regeneratedEdit,
+        }
+      })
+      setRecords((current) =>
+        current.map((record) =>
+          record.task_id === taskId
+            ? {
+                ...record,
+                title: regeneratedEdit.title,
+                description: regeneratedEdit.description,
+                source: regeneratedEdit.source,
+                tags: regeneratedEdit.tags
+                  .replaceAll("，", ",")
+                  .split(/[,\n]/)
+                  .map((tag) => tag.trim())
+                  .filter(Boolean),
+                tid: regeneratedEdit.tid ? Number(regeneratedEdit.tid) : record.tid,
+              }
+            : record,
+        ),
+      )
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.bilibili.regenerateMetadataError)
+    } finally {
+      setRegeneratingTask(null)
     }
   }
 
@@ -456,6 +523,18 @@ export default function BilibiliPage() {
                             {t.bilibili.openBilibili}
                           </Button>
                         ) : null}
+                        <Button
+                          variant="outline"
+                          onClick={() => regenerateMetadata(record.task_id)}
+                          disabled={regeneratingTask === record.task_id || record.publish_status === "running"}
+                        >
+                          {regeneratingTask === record.task_id ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCw className="size-4" />
+                          )}
+                          {t.bilibili.regenerateMetadata}
+                        </Button>
                         {record.type !== "published" ? (
                           <Button
                             onClick={() => publish(record.task_id)}

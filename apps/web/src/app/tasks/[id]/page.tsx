@@ -30,7 +30,6 @@ import {
   finalVideoDownloadUrl,
   finalVideoUrl,
   generateLocalizedMetadata,
-  getLocalizedMetadata,
   getTask,
   getTaskLog,
   redoStage,
@@ -258,16 +257,10 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
         const next = await getTask(id)
         if (cancelled) return
         setTask(next)
+        setLocalizedMetadata(next.localized_metadata ?? null)
         const logText = await getTaskLog(id)
         if (cancelled) return
         setLog(logText)
-        getLocalizedMetadata(id)
-          .then((metadata) => {
-            if (!cancelled) setLocalizedMetadata(metadata)
-          })
-          .catch(() => {
-            if (!cancelled) setLocalizedMetadata(null)
-          })
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : t.task.loadError)
       }
@@ -455,6 +448,27 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                       </div>
                     ) : null}
                   </div>
+                  {localizedMetadata.bilibili ? (
+                    <div className="grid gap-2 border-t pt-3">
+                      <Badge variant="secondary" className="w-fit">{t.task.bilibiliMetadata}</Badge>
+                      <p className="font-medium">{localizedMetadata.bilibili.title}</p>
+                      {localizedMetadata.bilibili.partition_label || localizedMetadata.bilibili.tid ? (
+                        <p className="text-muted-foreground">
+                          {localizedMetadata.bilibili.partition_label || localizedMetadata.bilibili.tid}
+                        </p>
+                      ) : null}
+                      {localizedMetadata.bilibili.description ? (
+                        <p className="line-clamp-6 whitespace-pre-wrap text-muted-foreground">{localizedMetadata.bilibili.description}</p>
+                      ) : null}
+                      {localizedMetadata.bilibili.tags.length ? (
+                        <div className="flex flex-wrap gap-2">
+                          {localizedMetadata.bilibili.tags.map((tag) => (
+                            <Badge key={tag} variant="outline">{tag}</Badge>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="grid gap-2 border-t pt-3">
                     <Badge variant="secondary" className="w-fit">{t.task.sourceMetadata}</Badge>
                     <p className="font-medium">{localizedMetadata.title}</p>

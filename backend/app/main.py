@@ -171,13 +171,8 @@ app = FastAPI(title="YouDub API", lifespan=lifespan)
 DEFAULT_CORS_ORIGIN_REGEX = (
     r"^https?://("
     r"localhost|"
-    r"127(?:\.\d{1,3}){3}|"
-    r"0\.0\.0\.0|"
-    r"10(?:\.\d{1,3}){3}|"
-    r"192\.168(?:\.\d{1,3}){2}|"
-    r"172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|"
-    r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}|"
-    r"\[::1\]"
+    r"[A-Za-z0-9][A-Za-z0-9.-]*|"
+    r"\[[0-9A-Fa-f:.]+\]"
     r"):3000$"
 )
 
@@ -406,6 +401,20 @@ def task_detail(task_id: str) -> dict:
     task = database.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    session_path = task.get("session_path")
+    if session_path:
+        session = Path(str(session_path))
+        if session.exists() and _is_inside_workfolder(session):
+            from .adapters.metadata_localization import load_artifact
+
+            payload = load_artifact(session)
+            task["localized_metadata"] = (
+                _public_localized_metadata(task_id, payload) if payload is not None else None
+            )
+        else:
+            task["localized_metadata"] = None
+    else:
+        task["localized_metadata"] = None
     return task
 
 
@@ -595,7 +604,18 @@ def generate_localized_metadata(task_id: str) -> dict:
     from .adapters.metadata_localization import localize_metadata
 
     try:
-        payload = localize_metadata(session, detect_source(task["url"]))
+        partition_options = []
+        try:
+            from .adapters.bilibili_publish import list_partitions
+
+            partition_options = list_partitions()
+        except Exception:
+            partition_options = []
+        payload = localize_metadata(
+            session,
+            detect_source(task["url"]),
+            partition_options=partition_options,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
