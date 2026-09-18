@@ -761,6 +761,9 @@ def get_openai_settings() -> dict[str, str]:
         "model": get_setting("openai.model", defaults["model"]),
         "preprocess_model": get_setting("openai.preprocess_model", defaults["preprocess_model"]),
         "metadata_model": get_setting("openai.metadata_model", defaults["metadata_model"]),
+        "thumbnail_prompt_model": get_setting(
+            "openai.thumbnail_prompt_model", defaults["thumbnail_prompt_model"]
+        ),
         "translate_concurrency": get_setting(
             "openai.translate_concurrency", defaults["translate_concurrency"]
         ),
@@ -779,6 +782,7 @@ def save_openai_settings(
     *,
     preprocess_model: str = "",
     metadata_model: str = "",
+    thumbnail_prompt_model: str = "",
     clear_api_key: bool = False,
 ) -> None:
     from .adapters.openai_client import normalize_openai_base_url
@@ -792,6 +796,7 @@ def save_openai_settings(
     set_setting("openai.model", model.strip())
     set_setting("openai.preprocess_model", preprocess_model.strip())
     set_setting("openai.metadata_model", metadata_model.strip())
+    set_setting("openai.thumbnail_prompt_model", thumbnail_prompt_model.strip())
     if translate_concurrency.strip():
         set_setting("openai.translate_concurrency", translate_concurrency.strip())
     set_setting("openai.translate_use_batch", translate_use_batch.strip().lower())
@@ -836,6 +841,9 @@ def sync_settings_from_env() -> dict[str, dict[str, str]]:
         openai["model"],
         openai["translate_concurrency"],
         openai["translate_use_batch"],
+        preprocess_model=openai["preprocess_model"],
+        metadata_model=openai["metadata_model"],
+        thumbnail_prompt_model=openai["thumbnail_prompt_model"],
         clear_api_key=not bool(openai["api_key"].strip()),
     )
     ytdlp = ytdlp_defaults()

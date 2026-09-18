@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Literal
 from urllib.parse import quote
 
@@ -59,6 +61,9 @@ TaskListSort = Literal[
 ]
 
 ACTIVE_BILIBILI_PUBLISHES: set[str] = set()
+ACTIVE_METADATA_JOBS: set[tuple[str, str]] = set()
+METADATA_JOB_LOCK = Lock()
+METADATA_JOB_OPERATIONS = {"localized", "thumbnail"}
 
 
 def mask_secret(value: str) -> str:
@@ -88,6 +93,7 @@ class OpenAISettingsUpdate(BaseModel):
     model: str
     preprocess_model: str = ""
     metadata_model: str = ""
+    thumbnail_prompt_model: str = ""
     translate_concurrency: str = ""
     translate_use_batch: bool = True
 
@@ -117,6 +123,7 @@ class BilibiliPublishRequest(BaseModel):
     source: str = ""
     tags: list[str] | str = ""
     tid: int | None = None
+    copyright: int | None = None
 
 
 def normalize_proxy_port(value: str) -> str:
@@ -576,9 +583,176 @@ def _task_session(task: dict) -> Path:
 def _public_localized_metadata(task_id: str, payload: dict) -> dict:
     thumbnail_file = payload.get("thumbnail_file")
     thumbnail_api_url = ""
-    if thumbnail_file and Path(str(thumbnail_file)).exists():
-        thumbnail_api_url = f"/api/tasks/{task_id}/artifact/thumbnail"
+    if thumbnail_file:
+        path = Path(str(thumbnail_file))
+        if path.exists():
+            thumbnail_api_url = f"/api/tasks/{task_id}/artifact/thumbnail?v={int(path.stat().st_mtime)}"
     return {**payload, "thumbnail_api_url": thumbnail_api_url}
+
+
+def _metadata_job_path(session: Path, operation: str) -> Path:
+    return session / "metadata" / f"{operation}_job.json"
+
+
+def _metadata_job_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_metadata_job_status(session: Path, operation: str, payload: dict) -> dict:
+    status = {**payload, "operation": operation, "updated_at": _metadata_job_now()}
+    path = _metadata_job_path(session, operation)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return status
+
+
+def _read_metadata_job_status(session: Path, operation: str) -> dict:
+    path = _metadata_job_path(session, operation)
+    if not path.exists():
+        return {
+            "operation": operation,
+            "status": "idle",
+            "progress": 0,
+            "message": "",
+            "error": "",
+            "log": [],
+            "result": None,
+        }
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "operation": operation,
+            "status": "failed",
+            "progress": 0,
+            "message": "Metadata job status is unreadable",
+            "error": "Metadata job status is unreadable",
+            "log": [],
+            "result": None,
+        }
+
+
+def _run_metadata_job(task_id: str, operation: str) -> None:
+    key = (task_id, operation)
+    try:
+        task = database.get_task(task_id)
+        if not task:
+            return
+        session = Path(str(task["session_path"]))
+        log: list[str] = []
+
+        def update(progress: int, message: str, **extra) -> dict:
+            log.append(message)
+            return _write_metadata_job_status(
+                session,
+                operation,
+                {
+                    "status": "running",
+                    "progress": progress,
+                    "message": message,
+                    "error": "",
+                    "log": log,
+                    "result": None,
+                    **extra,
+                },
+            )
+
+        update(5, "Started")
+        if operation == "localized":
+            from .adapters.metadata_localization import localize_metadata
+
+            partition_options = []
+            try:
+                from .adapters.bilibili_publish import list_partitions
+
+                update(15, "Loading Bilibili partitions")
+                partition_options = list_partitions()
+            except Exception as exc:
+                update(20, f"Using default partition settings: {exc}")
+                partition_options = []
+            update(35, "Generating localized metadata")
+            payload = localize_metadata(
+                session,
+                detect_source(task["url"]),
+                partition_options=partition_options,
+            )
+        elif operation == "thumbnail":
+            from .adapters.metadata_localization import generate_thumbnail
+
+            update(20, "Generating thumbnail specification")
+            payload = generate_thumbnail(session, detect_source(task["url"]))
+            thumbnail_error = (payload.get("thumbnail_generation") or {}).get("error")
+            if thumbnail_error:
+                raise RuntimeError(f"Failed to generate thumbnail: {thumbnail_error}")
+        else:
+            raise ValueError(f"Unknown metadata operation: {operation}")
+        public_payload = _public_localized_metadata(task_id, payload)
+        log.append("Completed")
+        _write_metadata_job_status(
+            session,
+            operation,
+            {
+                "status": "succeeded",
+                "progress": 100,
+                "message": "Completed",
+                "error": "",
+                "log": log,
+                "result": public_payload,
+            },
+        )
+    except Exception as exc:
+        task = database.get_task(task_id)
+        if task and task.get("session_path"):
+            session = Path(str(task["session_path"]))
+            current = _read_metadata_job_status(session, operation)
+            log = list(current.get("log") or [])
+            log.append(str(exc))
+            _write_metadata_job_status(
+                session,
+                operation,
+                {
+                    "status": "failed",
+                    "progress": int(current.get("progress") or 0),
+                    "message": "Failed",
+                    "error": str(exc),
+                    "log": log,
+                    "result": None,
+                },
+            )
+    finally:
+        with METADATA_JOB_LOCK:
+            ACTIVE_METADATA_JOBS.discard(key)
+
+
+def _start_metadata_job(task_id: str, operation: str) -> dict:
+    if operation not in METADATA_JOB_OPERATIONS:
+        raise HTTPException(status_code=404, detail="Metadata operation not found.")
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session = _task_session(task)
+    key = (task_id, operation)
+    with METADATA_JOB_LOCK:
+        current = _read_metadata_job_status(session, operation)
+        if key in ACTIVE_METADATA_JOBS and current.get("status") == "running":
+            return current
+        status = _write_metadata_job_status(
+            session,
+            operation,
+            {
+                "status": "running",
+                "progress": 0,
+                "message": "Queued",
+                "error": "",
+                "log": ["Queued"],
+                "result": None,
+            },
+        )
+        ACTIVE_METADATA_JOBS.add(key)
+    Thread(target=_run_metadata_job, args=(task_id, operation), daemon=True).start()
+    return status
 
 
 @app.get("/api/tasks/{task_id}/metadata/localized")
@@ -597,32 +771,23 @@ def get_localized_metadata(task_id: str) -> dict:
 
 @app.post("/api/tasks/{task_id}/metadata/localized")
 def generate_localized_metadata(task_id: str) -> dict:
+    return _start_metadata_job(task_id, "localized")
+
+
+@app.post("/api/tasks/{task_id}/metadata/thumbnail")
+def generate_task_thumbnail(task_id: str) -> dict:
+    return _start_metadata_job(task_id, "thumbnail")
+
+
+@app.get("/api/tasks/{task_id}/metadata/jobs/{operation}")
+def get_metadata_job_status(task_id: str, operation: str) -> dict:
+    if operation not in METADATA_JOB_OPERATIONS:
+        raise HTTPException(status_code=404, detail="Metadata operation not found.")
     task = database.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
     session = _task_session(task)
-    from .adapters.metadata_localization import localize_metadata
-
-    try:
-        partition_options = []
-        try:
-            from .adapters.bilibili_publish import list_partitions
-
-            partition_options = list_partitions()
-        except Exception:
-            partition_options = []
-        payload = localize_metadata(
-            session,
-            detect_source(task["url"]),
-            partition_options=partition_options,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to localize metadata: {exc}") from exc
-    return _public_localized_metadata(task_id, payload)
+    return _read_metadata_job_status(session, operation)
 
 
 @app.get("/api/tasks/{task_id}/artifact/thumbnail")
@@ -763,7 +928,7 @@ def start_bilibili_publish(task_id: str, payload: BilibiliPublishRequest | None 
         return current
     overrides = payload.model_dump() if payload else {}
     previous = current or {}
-    for key in ("title", "description", "source", "tags", "tid"):
+    for key in ("title", "description", "source", "tags", "tid", "copyright"):
         if overrides.get(key):
             continue
         if previous.get(key):
@@ -784,6 +949,7 @@ def start_bilibili_publish(task_id: str, payload: BilibiliPublishRequest | None 
             "source": overrides.get("source", "").strip(),
             "tags": [tag.strip() for tag in tag_text.replace("，", ",").replace("\n", ",").split(",") if tag.strip()][:10],
             "tid": overrides.get("tid"),
+            "copyright": overrides.get("copyright") if overrides.get("copyright") in {1, 2} else 1,
             "error": "",
             "result": None,
             "video_file": str(final_path),
@@ -838,6 +1004,7 @@ def get_openai_settings() -> dict:
         "model": settings["model"],
         "preprocess_model": settings["preprocess_model"],
         "metadata_model": settings["metadata_model"],
+        "thumbnail_prompt_model": settings["thumbnail_prompt_model"],
         "translate_concurrency": settings["translate_concurrency"],
         "translate_use_batch": bool_setting(settings["translate_use_batch"]),
     }
@@ -853,6 +1020,7 @@ def save_openai_settings(payload: OpenAISettingsUpdate) -> dict:
         "true" if payload.translate_use_batch else "false",
         preprocess_model=payload.preprocess_model,
         metadata_model=payload.metadata_model,
+        thumbnail_prompt_model=payload.thumbnail_prompt_model,
         clear_api_key=payload.clear_api_key,
     )
     return get_openai_settings()
@@ -899,6 +1067,7 @@ def sync_settings_from_env() -> dict:
             "model": openai["model"],
             "preprocess_model": openai["preprocess_model"],
             "metadata_model": openai["metadata_model"],
+            "thumbnail_prompt_model": openai["thumbnail_prompt_model"],
             "translate_concurrency": openai["translate_concurrency"],
             "translate_use_batch": bool_setting(openai["translate_use_batch"]),
         },

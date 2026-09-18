@@ -43,6 +43,7 @@ type SettingsForm = {
   model: string
   preprocessModel: string
   metadataModel: string
+  thumbnailPromptModel: string
   translateConcurrency: string
   translateUseBatch: boolean
   proxyPort: string
@@ -60,6 +61,7 @@ const defaultSettings: SettingsForm = {
   model: "gpt-4o-mini",
   preprocessModel: "",
   metadataModel: "",
+  thumbnailPromptModel: "",
   translateConcurrency: "5",
   translateUseBatch: true,
   proxyPort: "",
@@ -108,11 +110,17 @@ export function SettingsDialog() {
           model: openai.model,
           preprocessModel: openai.preprocess_model || "",
           metadataModel: openai.metadata_model || "",
+          thumbnailPromptModel: openai.thumbnail_prompt_model || "",
           translateConcurrency: openai.translate_concurrency || "5",
           translateUseBatch: openai.translate_use_batch,
           proxyPort: ytdlp.proxy_port,
         })
-        setModelOptions(uniqueModels([openai.model, openai.preprocess_model, openai.metadata_model]))
+        setModelOptions(uniqueModels([
+          openai.model,
+          openai.preprocess_model,
+          openai.metadata_model,
+          openai.thumbnail_prompt_model,
+        ]))
         setModelsLoaded(false)
         setShowApiKey(false)
         setCookieDirty(false)
@@ -140,6 +148,7 @@ export function SettingsDialog() {
         model: settings.model,
         preprocess_model: settings.preprocessModel,
         metadata_model: settings.metadataModel,
+        thumbnail_prompt_model: settings.thumbnailPromptModel,
         translate_concurrency: settings.translateConcurrency,
         translate_use_batch: settings.translateUseBatch,
       })
@@ -151,6 +160,7 @@ export function SettingsDialog() {
         cookie: cookieDirty ? (cookie?.exists ? SAVED_COOKIE_SENTINEL : "") : current.cookie,
         preprocessModel: openai.preprocess_model || "",
         metadataModel: openai.metadata_model || "",
+        thumbnailPromptModel: openai.thumbnail_prompt_model || "",
         translateConcurrency: openai.translate_concurrency || current.translateConcurrency,
         translateUseBatch: openai.translate_use_batch,
         proxyPort: ytdlp.proxy_port,
@@ -176,6 +186,7 @@ export function SettingsDialog() {
         settings.model,
         settings.preprocessModel,
         settings.metadataModel,
+        settings.thumbnailPromptModel,
         ...response.models,
       ])
       setModelOptions(models)
@@ -222,6 +233,7 @@ export function SettingsDialog() {
         model: synced.openai.model,
         preprocessModel: synced.openai.preprocess_model || "",
         metadataModel: synced.openai.metadata_model || "",
+        thumbnailPromptModel: synced.openai.thumbnail_prompt_model || "",
         translateConcurrency: synced.openai.translate_concurrency || "5",
         translateUseBatch: synced.openai.translate_use_batch,
         proxyPort: synced.ytdlp.proxy_port,
@@ -231,6 +243,7 @@ export function SettingsDialog() {
           synced.openai.model,
           synced.openai.preprocess_model,
           synced.openai.metadata_model,
+          synced.openai.thumbnail_prompt_model,
         ])
       )
       setModelsLoaded(false)
@@ -411,7 +424,7 @@ export function SettingsDialog() {
                   </Button>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <div className="grid gap-2">
                   <Label htmlFor="preprocessModel">{t.settings.preprocessModel}</Label>
                   <Input
@@ -432,6 +445,17 @@ export function SettingsDialog() {
                       setSettings((current) => ({ ...current, metadataModel: event.target.value }))
                     }
                     placeholder={settings.model}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="thumbnailPromptModel">{t.settings.thumbnailPromptModel}</Label>
+                  <Input
+                    id="thumbnailPromptModel"
+                    value={settings.thumbnailPromptModel}
+                    onChange={(event) =>
+                      setSettings((current) => ({ ...current, thumbnailPromptModel: event.target.value }))
+                    }
+                    placeholder={settings.metadataModel || settings.model}
                   />
                 </div>
               </div>

@@ -39,6 +39,7 @@ def openai_defaults() -> dict[str, str]:
         "model": os.getenv("OPENAI_MODEL") or os.getenv("OPENAI_MODEL_NAME") or "gpt-4o-mini",
         "preprocess_model": os.getenv("OPENAI_PREPROCESS_MODEL", ""),
         "metadata_model": os.getenv("OPENAI_METADATA_MODEL", ""),
+        "thumbnail_prompt_model": os.getenv("OPENAI_THUMBNAIL_PROMPT_MODEL", ""),
         "translate_concurrency": os.getenv("OPENAI_TRANSLATE_CONCURRENCY", "5"),
         "translate_use_batch": os.getenv("OPENAI_TRANSLATE_USE_BATCH", "true"),
     }
@@ -64,7 +65,7 @@ def ffprobe_binary() -> str:
 def bilibili_publish_defaults() -> dict[str, str]:
     return {
         "tid": os.getenv("BILIBILI_TID", "21"),
-        "copyright": os.getenv("BILIBILI_COPYRIGHT", "2"),
+        "copyright": os.getenv("BILIBILI_COPYRIGHT", "1"),
         "line": os.getenv("BILIBILI_UPLOAD_LINE", "bda2"),
         "threads": os.getenv("BILIBILI_UPLOAD_THREADS", "3"),
         "source": os.getenv("BILIBILI_SOURCE", ""),

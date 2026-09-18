@@ -13,6 +13,7 @@ import {
   clearBilibiliCredentials,
   createBilibiliQrCode,
   getBilibiliCredentialsStatus,
+  getMetadataJobStatus,
   generateLocalizedMetadata,
   listBilibiliAccountArchives,
   listBilibiliPartitions,
@@ -36,6 +37,7 @@ type PublishEdit = {
   title: string
   description: string
   source: string
+  copyright: string
   tags: string
   tid: string
 }
@@ -49,6 +51,10 @@ function formatTime(value: string | null) {
 
 function normalizeProgress(value: number) {
   return Math.max(0, Math.min(100, Math.round(value || 0)))
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 export default function BilibiliPage() {
@@ -79,6 +85,7 @@ export default function BilibiliPage() {
           title: record.title || "",
           description: record.description || "",
           source: record.source || "",
+          copyright: record.copyright ? String(record.copyright) : "1",
           tags: (record.tags || []).join(", "),
           tid: record.tid ? String(record.tid) : "",
         }
@@ -221,6 +228,7 @@ export default function BilibiliPage() {
         title: "",
         description: "",
         source: "",
+        copyright: "1",
         tags: "",
         tid: "",
       }
@@ -243,6 +251,7 @@ export default function BilibiliPage() {
         title: edit?.title || "",
         description: edit?.description || "",
         source: edit?.source || "",
+        copyright: edit?.copyright ? Number(edit.copyright) : 1,
         tags: (edit?.tags || "")
           .replaceAll("，", ",")
           .split(/[,\n]/)
@@ -262,13 +271,21 @@ export default function BilibiliPage() {
     setRegeneratingTask(taskId)
     setError("")
     try {
-      const metadata = await generateLocalizedMetadata(taskId)
+      let job = await generateLocalizedMetadata(taskId)
+      while (job.status === "running") {
+        await delay(1200)
+        job = await getMetadataJobStatus(taskId, "localized")
+      }
+      if (job.status === "failed") throw new Error(job.error || job.message)
+      const metadata = job.result
+      if (!metadata) throw new Error(t.bilibili.regenerateMetadataError)
       const bilibili = metadata.bilibili
       const regeneratedEdit: PublishEdit | null = bilibili
         ? {
             title: bilibili.title || "",
             description: bilibili.description || "",
             source: bilibili.source || "",
+            copyright: "1",
             tags: (bilibili.tags || []).join(", "),
             tid: bilibili.tid ? String(bilibili.tid) : "",
           }
@@ -288,6 +305,7 @@ export default function BilibiliPage() {
                 title: regeneratedEdit.title,
                 description: regeneratedEdit.description,
                 source: regeneratedEdit.source,
+                copyright: Number(regeneratedEdit.copyright),
                 tags: regeneratedEdit.tags
                   .replaceAll("，", ",")
                   .split(/[,\n]/)
@@ -464,7 +482,7 @@ export default function BilibiliPage() {
                               onChange={(event) => updatePublishEdit(record.task_id, "description", event.target.value)}
                             />
                           </div>
-                          <div className="grid gap-3 md:grid-cols-2">
+                          <div className="grid gap-3 md:grid-cols-3">
                             <div className="grid gap-1">
                               <label className="text-xs font-medium text-muted-foreground" htmlFor={`bili-tid-${record.task_id}`}>
                                 {t.bilibili.metadataPartition}
@@ -486,6 +504,23 @@ export default function BilibiliPage() {
                               </Select>
                             </div>
                             <div className="grid gap-1">
+                              <label className="text-xs font-medium text-muted-foreground" htmlFor={`bili-copyright-${record.task_id}`}>
+                                {t.bilibili.metadataCopyright}
+                              </label>
+                              <Select
+                                value={publishEdits[record.task_id]?.copyright || "1"}
+                                onValueChange={(value) => updatePublishEdit(record.task_id, "copyright", value ?? "1")}
+                              >
+                                <SelectTrigger id={`bili-copyright-${record.task_id}`}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="1">{t.bilibili.copyrightOriginal}</SelectItem>
+                                  <SelectItem value="2">{t.bilibili.copyrightRepost}</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="grid gap-1">
                               <label className="text-xs font-medium text-muted-foreground" htmlFor={`bili-source-${record.task_id}`}>
                                 {t.bilibili.metadataSource}
                               </label>
@@ -495,7 +530,7 @@ export default function BilibiliPage() {
                                 onChange={(event) => updatePublishEdit(record.task_id, "source", event.target.value)}
                               />
                             </div>
-                            <div className="grid gap-1 md:col-span-2">
+                            <div className="grid gap-1 md:col-span-3">
                               <label className="text-xs font-medium text-muted-foreground" htmlFor={`bili-tags-${record.task_id}`}>
                                 {t.bilibili.metadataTags}
                               </label>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import mimetypes
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -265,6 +266,215 @@ Localized tags:
 """
 
 
+def _thumbnail_edit_prompt_request(
+    *,
+    source: SourceConfig,
+    title: str,
+    translated_title: str,
+    description: str,
+    translated_description: str,
+    tags: list[str],
+) -> str:
+    context = {
+        "source_language": source.asr_language_name,
+        "target_language": source.target_language_name,
+        "original_title": title,
+        "localized_title": translated_title or title,
+        "original_description_excerpt": (description or "")[:800],
+        "localized_description_excerpt": (translated_description or description or "")[:800],
+        "localized_tags": tags[:12],
+    }
+    return f"""1. 为图片编辑模型创建简洁可执行的提示词；
+2. 任务：针对现有视频缩略图生成编辑的单一提示词，图片模型将以原始缩略图为参考图；
+3. 硬性要求：
+   - 保留原始缩略图的主要内容；
+   - 移除原始缩略图中的{source.asr_language_name}可读文本，添加{source.target_language_name}文本，文本需醒目、清晰、自然，适配16:9视频封面尺寸以吸引点击；
+   - 不得重新设计缩略图，不得添加新人物、logo、水印、二维码、平台UI、徽章、宣传语、数字或无关物体；
+4. 提示词需简短可操作，不含长描述、标签、免责声明或分析；
+5. 元数据上下文：
+{json.dumps(context, ensure_ascii=False, indent=2)}
+6. 仅返回严格JSON格式，示例结构如下：
+{{
+  "prompt": "<发送给图片编辑模型的精确提示词>"
+}}
+"""
+
+
+def generate_thumbnail_edit_prompt(
+    *,
+    source: SourceConfig,
+    title: str,
+    translated_title: str,
+    description: str,
+    translated_description: str,
+    tags: list[str],
+) -> dict[str, str]:
+    settings = get_openai_settings()
+    model = (
+        str(settings.get("thumbnail_prompt_model") or "").strip()
+        or str(settings.get("metadata_model") or "").strip()
+        or settings["model"]
+    )
+    client = _client(settings["base_url"], settings["api_key"])
+    result = _call_json(
+        client,
+        model,
+        "You output strict JSON only.",
+        _thumbnail_edit_prompt_request(
+            source=source,
+            title=title,
+            translated_title=translated_title,
+            description=description,
+            translated_description=translated_description,
+            tags=tags,
+        ),
+    )
+    prompt = str(result.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("Thumbnail prompt model returned an empty prompt.")
+    return {
+        "model": model,
+        "base_url": normalize_openai_base_url(settings["base_url"]),
+        "prompt": prompt,
+    }
+
+
+def _write_image_response_data(image_data: Any, output_file: Path) -> None:
+    b64_json = image_data.get("b64_json") if isinstance(image_data, dict) else getattr(image_data, "b64_json", None)
+    if b64_json:
+        output_file.write_bytes(base64.b64decode(b64_json))
+        return
+    url = image_data.get("url") if isinstance(image_data, dict) else getattr(image_data, "url", None)
+    if url:
+        response = requests.get(url, timeout=THUMBNAIL_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        output_file.write_bytes(response.content)
+        return
+    raise RuntimeError("OpenAI image response did not include image data.")
+
+
+def _image_data_url(path: Path) -> str:
+    media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
+
+
+def _is_openrouter_image_base(base_url: str) -> bool:
+    return "openrouter.ai" in base_url.lower()
+
+
+def _openrouter_images_url(base_url: str) -> str:
+    url = normalize_openai_base_url(base_url).rstrip("/")
+    lowered = url.lower()
+    if lowered.endswith("/images"):
+        return url
+    return f"{url}/images"
+
+
+def _edit_thumbnail_with_openrouter(
+    *,
+    settings: dict[str, str],
+    thumbnail_file: Path,
+    prompt: str,
+    output_file: Path,
+) -> None:
+    response = requests.post(
+        _openrouter_images_url(settings["base_url"]),
+        headers={
+            "Authorization": f"Bearer {settings['api_key']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": settings["model"],
+            "prompt": prompt,
+            "n": 1,
+            "aspect_ratio": "16:9",
+            "quality": "high",
+            "output_format": "png",
+            "input_references": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_data_url(thumbnail_file),
+                    },
+                }
+            ],
+        },
+        timeout=IMAGE_EDIT_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    body = response.json()
+    data = body.get("data") if isinstance(body, dict) else None
+    if not data:
+        raise RuntimeError("OpenRouter image response did not include image data.")
+    _write_image_response_data(data[0], output_file)
+
+
+def generate_thumbnail(session: Path, source: SourceConfig) -> dict[str, Any]:
+    payload = load_artifact(session)
+    if payload is None:
+        payload = localize_metadata(session, source)
+    info = json.loads(metadata_file(session).read_text(encoding="utf-8"))
+    image_settings = openai_image_defaults()
+    source_thumbnail_value = str(payload.get("source_thumbnail_file") or "").strip()
+    source_thumbnail_file = Path(source_thumbnail_value) if source_thumbnail_value else None
+    if not source_thumbnail_file or not source_thumbnail_file.exists():
+        existing_thumbnail_value = str(payload.get("thumbnail_file") or "").strip()
+        existing_thumbnail_file = Path(existing_thumbnail_value) if existing_thumbnail_value else None
+        if existing_thumbnail_file and existing_thumbnail_file.exists() and existing_thumbnail_file.name != "thumbnail.generated.jpg":
+            source_thumbnail_file = existing_thumbnail_file
+        else:
+            downloaded = download_thumbnail(session, str(payload.get("thumbnail_url") or info.get("thumbnail") or ""))
+            source_thumbnail_file = downloaded
+            if downloaded:
+                payload["source_thumbnail_file"] = str(downloaded)
+    generation: dict[str, Any] = {
+        "model": image_settings["model"],
+        "base_url": normalize_openai_base_url(image_settings["base_url"]),
+        "mode": "edit",
+        "source_file": str(source_thumbnail_file) if source_thumbnail_file else "",
+        "error": "",
+    }
+    translated_tags = payload.get("translated_tags") or payload.get("tags") or []
+    if not isinstance(translated_tags, list):
+        translated_tags = []
+    prompt_info = generate_thumbnail_edit_prompt(
+        source=source,
+        title=str(payload.get("title") or info.get("title") or ""),
+        translated_title=str(payload.get("translated_title") or payload.get("title") or info.get("title") or ""),
+        description=str(payload.get("description") or info.get("description") or ""),
+        translated_description=str(payload.get("translated_description") or payload.get("description") or ""),
+        tags=translated_tags,
+    )
+    generation.update(
+        {
+            "prompt_model": prompt_info["model"],
+            "prompt_base_url": prompt_info["base_url"],
+            "prompt": prompt_info["prompt"],
+        }
+    )
+    localized_thumbnail_file, thumbnail_translation = translate_thumbnail(
+        session,
+        source_thumbnail_file if source_thumbnail_file and source_thumbnail_file.exists() else None,
+        source=source,
+        title=str(payload.get("title") or info.get("title") or ""),
+        translated_title=str(payload.get("translated_title") or payload.get("title") or info.get("title") or ""),
+        description=str(payload.get("description") or info.get("description") or ""),
+        translated_description=str(payload.get("translated_description") or payload.get("description") or ""),
+        translated_tags=translated_tags,
+        prompt=prompt_info["prompt"],
+    )
+    generation["error"] = str(thumbnail_translation.get("error") or "")
+    if localized_thumbnail_file:
+        generation["output_file"] = str(localized_thumbnail_file)
+        payload["thumbnail_file"] = str(localized_thumbnail_file)
+        payload["translated_thumbnail_file"] = str(localized_thumbnail_file)
+    payload["thumbnail_translation"] = thumbnail_translation
+    payload["thumbnail_generation"] = generation
+    artifact_path(session).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
 def translate_thumbnail(
     session: Path,
     thumbnail_file: Path | None,
@@ -275,6 +485,7 @@ def translate_thumbnail(
     description: str,
     translated_description: str,
     translated_tags: list[str],
+    prompt: str | None = None,
 ) -> tuple[Path | None, dict[str, Any]]:
     settings = openai_image_defaults()
     metadata: dict[str, Any] = {
@@ -288,15 +499,9 @@ def translate_thumbnail(
     if not settings["api_key"]:
         metadata["error"] = "OpenAI image API key is not configured."
         return None, metadata
-
-    client = OpenAI(
-        api_key=settings["api_key"],
-        base_url=normalize_openai_base_url(settings["base_url"]),
-        timeout=IMAGE_EDIT_TIMEOUT_SECONDS,
-        max_retries=0,
-    )
     output_file = session / "media" / "thumbnail.localized.png"
-    prompt = _cover_prompt(
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt = prompt or _cover_prompt(
         source=source,
         title=title,
         translated_title=translated_title,
@@ -305,20 +510,34 @@ def translate_thumbnail(
         tags=translated_tags,
     )
     try:
-        with thumbnail_file.open("rb") as image:
-            response = client.images.edit(
-                model=settings["model"],
-                image=image,
+        if _is_openrouter_image_base(settings["base_url"]):
+            metadata["provider"] = "openrouter"
+            _edit_thumbnail_with_openrouter(
+                settings=settings,
+                thumbnail_file=thumbnail_file,
                 prompt=prompt,
-                size="auto",
-                quality="high",
-                input_fidelity="high",
-                output_format="png",
-                response_format="b64_json",
+                output_file=output_file,
             )
-        if not response.data or not response.data[0].b64_json:
-            raise RuntimeError("OpenAI image edit response did not include image data.")
-        output_file.write_bytes(base64.b64decode(response.data[0].b64_json))
+        else:
+            client = OpenAI(
+                api_key=settings["api_key"],
+                base_url=normalize_openai_base_url(settings["base_url"]),
+                timeout=IMAGE_EDIT_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
+            with thumbnail_file.open("rb") as image:
+                response = client.images.edit(
+                    model=settings["model"],
+                    image=image,
+                    prompt=prompt,
+                    size="auto",
+                    quality="high",
+                    input_fidelity="high",
+                    output_format="png",
+                )
+            if not response.data:
+                raise RuntimeError("OpenAI image edit response did not include image data.")
+            _write_image_response_data(response.data[0], output_file)
         return output_file, metadata
     except Exception as exc:
         log.warning("Failed to translate thumbnail with OpenAI Images API: %s", exc)
@@ -438,26 +657,17 @@ def localize_metadata(
         body=str(translated.get("bilibili_description") or "").strip(),
         fallback_body=translated_description or description,
     )
-    localized_thumbnail_file, thumbnail_translation = translate_thumbnail(
-        session,
-        thumbnail_file,
-        source=source,
-        title=title,
-        translated_title=translated_title,
-        description=description,
-        translated_description=translated_description,
-        translated_tags=translated_tags,
-    )
-    publish_thumbnail_file = localized_thumbnail_file or thumbnail_file
     payload = {
         "title": title,
         "description": description,
         "tags": tags,
         "thumbnail_url": thumbnail_url,
         "source_thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
-        "thumbnail_file": str(publish_thumbnail_file) if publish_thumbnail_file else "",
-        "translated_thumbnail_file": str(localized_thumbnail_file) if localized_thumbnail_file else "",
-        "thumbnail_translation": thumbnail_translation,
+        "thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
+        "translated_thumbnail_file": "",
+        "generated_thumbnail_file": "",
+        "thumbnail_translation": {},
+        "thumbnail_generation": {},
         "translated_title": translated_title,
         "translated_description": translated_description,
         "translated_tags": translated_tags,

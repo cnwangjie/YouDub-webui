@@ -22,6 +22,7 @@ import {
 import {
   ExecutionMode,
   LocalizedMetadata,
+  MetadataJobStatus,
   StageStatus,
   Task,
   cancelTask,
@@ -30,6 +31,8 @@ import {
   finalVideoDownloadUrl,
   finalVideoUrl,
   generateLocalizedMetadata,
+  generateTaskThumbnail,
+  getMetadataJobStatus,
   getTask,
   getTaskLog,
   redoStage,
@@ -130,6 +133,9 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [redoError, setRedoError] = useState("")
   const [localizedMetadata, setLocalizedMetadata] = useState<LocalizedMetadata | null>(null)
   const [localizingMetadata, setLocalizingMetadata] = useState(false)
+  const [generatingThumbnail, setGeneratingThumbnail] = useState(false)
+  const [metadataJobOpen, setMetadataJobOpen] = useState(false)
+  const [metadataJob, setMetadataJob] = useState<MetadataJobStatus | null>(null)
   const [localizedMetadataError, setLocalizedMetadataError] = useState("")
 
   const handleDelete = async () => {
@@ -220,18 +226,76 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     if (succeeded) setRedoConfirmStage(null)
   }
 
-  const handleLocalizeMetadata = async () => {
-    setLocalizingMetadata(true)
+  const startMetadataJob = async (operation: "localized" | "thumbnail") => {
+    if (operation === "localized") setLocalizingMetadata(true)
+    if (operation === "thumbnail") setGeneratingThumbnail(true)
     setLocalizedMetadataError("")
+    setMetadataJobOpen(true)
     try {
-      const next = await generateLocalizedMetadata(id)
-      setLocalizedMetadata(next)
+      const next = operation === "localized" ? await generateLocalizedMetadata(id) : await generateTaskThumbnail(id)
+      setMetadataJob(next)
+      if (next.result) setLocalizedMetadata(next.result)
+      if (next.status !== "running") {
+        if (operation === "localized") setLocalizingMetadata(false)
+        if (operation === "thumbnail") setGeneratingThumbnail(false)
+        if (next.status === "failed") setLocalizedMetadataError(next.error || next.message)
+      }
     } catch (err) {
-      setLocalizedMetadataError(err instanceof Error ? err.message : t.task.localizedMetadataError)
-    } finally {
-      setLocalizingMetadata(false)
+      setLocalizedMetadataError(
+        err instanceof Error
+          ? err.message
+          : operation === "localized"
+            ? t.task.localizedMetadataError
+            : t.task.generateThumbnailError,
+      )
+      if (operation === "localized") setLocalizingMetadata(false)
+      if (operation === "thumbnail") setGeneratingThumbnail(false)
     }
   }
+
+  const handleLocalizeMetadata = async () => {
+    await startMetadataJob("localized")
+  }
+
+  const handleGenerateThumbnail = async () => {
+    await startMetadataJob("thumbnail")
+  }
+
+  const metadataJobProgress = normalizeProgress(metadataJob?.progress) ?? 0
+  const metadataJobTitle =
+    metadataJob?.operation === "thumbnail" ? t.task.thumbnailJobTitle : t.task.metadataJobTitle
+  const metadataJobOperation = metadataJob?.operation
+  const metadataJobStatus = metadataJob?.status
+
+  useEffect(() => {
+    if (!metadataJobOperation || metadataJobStatus !== "running") return
+    let cancelled = false
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getMetadataJobStatus(id, metadataJobOperation)
+        if (cancelled) return
+        setMetadataJob(next)
+        if (next.result) setLocalizedMetadata(next.result)
+        if (next.status !== "running") {
+          setLocalizingMetadata(false)
+          setGeneratingThumbnail(false)
+          if (next.status === "failed") setLocalizedMetadataError(next.error || next.message)
+          window.clearInterval(timer)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setLocalizingMetadata(false)
+          setGeneratingThumbnail(false)
+          setLocalizedMetadataError(err instanceof Error ? err.message : t.task.metadataJobError)
+          window.clearInterval(timer)
+        }
+      }
+    }, 1200)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [id, metadataJobOperation, metadataJobStatus, t.task.metadataJobError])
 
   const scrollLogToBottom = (behavior: ScrollBehavior = "smooth") => {
     const element = logRef.current
@@ -412,9 +476,20 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
             {localizedMetadata ? (
               <div className="grid gap-4 md:grid-cols-[220px_1fr]">
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <ImageIcon className="size-4" />
-                    {t.task.cover}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-medium">
+                    <span className="flex items-center gap-2">
+                      <ImageIcon className="size-4" />
+                      {t.task.cover}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleGenerateThumbnail}
+                      disabled={generatingThumbnail || !localizedMetadata || !task?.session_path}
+                    >
+                      {generatingThumbnail ? <Loader2 className="size-4 animate-spin" /> : <ImageIcon className="size-4" />}
+                      {generatingThumbnail ? t.task.generatingThumbnail : t.task.generateThumbnail}
+                    </Button>
                   </div>
                   {localizedMetadata.thumbnail_api_url || localizedMetadata.thumbnail_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -694,6 +769,50 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
             </div>
           </CardContent>
         </Card>
+
+        <Dialog open={metadataJobOpen} onOpenChange={setMetadataJobOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{metadataJobTitle}</DialogTitle>
+              <DialogDescription>{t.task.metadataJobDescription}</DialogDescription>
+            </DialogHeader>
+            {metadataJob ? (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span>{metadataJob.message || metadataJob.status}</span>
+                  <Badge className={statusBadgeClass(metadataJob.status)}>{statusLabel(metadataJob.status)}</Badge>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Progress value={metadataJobProgress} className="min-w-0 flex-1" />
+                  <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
+                    {metadataJobProgress}%
+                  </span>
+                </div>
+                {metadataJob.error ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {metadataJob.error}
+                  </div>
+                ) : null}
+                <div className="max-h-56 overflow-y-auto rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  {metadataJob.log.length ? (
+                    metadataJob.log.map((line, index) => (
+                      <p key={`${index}-${line}`} className="whitespace-pre-wrap">
+                        {line}
+                      </p>
+                    ))
+                  ) : (
+                    <p>{t.common.waiting}</p>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            <DialogFooter>
+              <Button onClick={() => setMetadataJobOpen(false)} disabled={metadataJob?.status === "running"}>
+                {metadataJob?.status === "running" ? t.common.waiting : t.common.close}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Card className="border-red-200">
           <CardHeader>

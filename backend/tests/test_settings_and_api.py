@@ -168,7 +168,7 @@ def test_get_localized_metadata_reads_artifact(monkeypatch, tmp_path):
     body = main.get_localized_metadata(task_id)
 
     assert body["translated_title"] == "翻译标题"
-    assert body["thumbnail_api_url"] == f"/api/tasks/{task_id}/artifact/thumbnail"
+    assert body["thumbnail_api_url"].startswith(f"/api/tasks/{task_id}/artifact/thumbnail?v=")
 
 
 def test_generate_localized_metadata_uses_adapter(monkeypatch, tmp_path):
@@ -195,9 +195,22 @@ def test_generate_localized_metadata_uses_adapter(monkeypatch, tmp_path):
         }
 
     monkeypatch.setattr(metadata_localization, "localize_metadata", fake_localize)
-    body = main.generate_localized_metadata(task_id)
 
-    assert body["translated_title"] == "Translated"
+    class ImmediateThread:
+        def __init__(self, target, args=(), daemon=False):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(main, "Thread", ImmediateThread)
+    body = main.generate_localized_metadata(task_id)
+    status = main.get_metadata_job_status(task_id, "localized")
+
+    assert body["status"] == "running"
+    assert status["status"] == "succeeded"
+    assert status["result"]["translated_title"] == "Translated"
 
 
 def test_task_id_is_video_id_and_dedupes_existing(monkeypatch, tmp_path):
@@ -595,7 +608,7 @@ def test_task_detail_includes_localized_metadata(monkeypatch, tmp_path):
     assert response.status_code == 200
     localized = response.json()["localized_metadata"]
     assert localized["translated_title"] == "Translated"
-    assert localized["thumbnail_api_url"] == f"/api/tasks/{task_id}/artifact/thumbnail"
+    assert localized["thumbnail_api_url"].startswith(f"/api/tasks/{task_id}/artifact/thumbnail?v=")
 
 
 def test_delete_task_removes_session_log_and_record(monkeypatch, tmp_path):

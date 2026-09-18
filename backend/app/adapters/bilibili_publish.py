@@ -54,7 +54,7 @@ def _json_response(response: requests.Response) -> dict[str, Any]:
 
 @dataclass
 class PublishData:
-    copyright: int = 2
+    copyright: int = 1
     source: str = ""
     tid: int = 21
     cover: str = ""
@@ -474,13 +474,18 @@ def _publish_fields(
         tid = int(overrides.get("tid") or bilibili.get("tid") or config["tid"])
     except (TypeError, ValueError):
         tid = int(config["tid"])
+    try:
+        copyright_value = int(overrides.get("copyright") or config["copyright"])
+    except (TypeError, ValueError):
+        copyright_value = 1
+    copyright = copyright_value if copyright_value in {1, 2} else 1
     return {
         "title": _trim(str(title), TITLE_LIMIT),
         "description": _trim(str(description), DESCRIPTION_LIMIT),
         "tags": tags,
         "cover_file": str(metadata.get("thumbnail_file") or ""),
         "tid": tid,
-        "copyright": int(config["copyright"]),
+        "copyright": copyright,
         "source": source_url,
         "line": config["line"],
         "threads": int(config["threads"]) if config["threads"].isdigit() else 3,
@@ -729,6 +734,11 @@ def list_publish_records() -> list[dict[str, Any]]:
                     or fields.get("source")
                     or ""
                 ),
+                "copyright": int(
+                    (status_fields.get("copyright") if use_status_fields else None)
+                    or fields.get("copyright")
+                    or bilibili_publish_defaults()["copyright"]
+                ),
                 "tid": int(
                     (status_fields.get("tid") if use_status_fields else None)
                     or fields.get("tid")
@@ -761,6 +771,7 @@ def publish_to_bilibili(
         "description": fields["description"],
         "tags": fields["tags"],
         "tid": fields["tid"],
+        "copyright": fields["copyright"],
         "source": fields["source"],
         "video_file": str(video_file),
         "result": None,

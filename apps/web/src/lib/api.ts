@@ -60,6 +60,7 @@ export type OpenAISettings = {
   model: string
   preprocess_model: string
   metadata_model: string
+  thumbnail_prompt_model: string
   translate_concurrency: string
   translate_use_batch: boolean
 }
@@ -98,6 +99,20 @@ export type LocalizedMetadata = {
     base_url: string
     error: string
   }
+  thumbnail_generation?: {
+    model: string
+    base_url: string
+    mode?: string
+    source_file?: string
+    prompt_model?: string
+    prompt_base_url?: string
+    spec_model?: string
+    spec?: unknown
+    prompt?: string
+    raw_file?: string
+    output_file?: string
+    error: string
+  }
   thumbnail_api_url: string
   translated_title: string
   translated_description: string
@@ -112,6 +127,17 @@ export type LocalizedMetadata = {
   }
   model: string
   base_url: string
+}
+
+export type MetadataJobStatus = {
+  operation: "localized" | "thumbnail"
+  status: "idle" | "running" | "succeeded" | "failed"
+  progress: number
+  message: string
+  error: string
+  log: string[]
+  result: LocalizedMetadata | null
+  updated_at?: string
 }
 
 export type BilibiliCredentialsStatus = {
@@ -156,6 +182,7 @@ export type BilibiliPublishRecord = {
   description: string
   tags: string[]
   source: string
+  copyright: number
   tid: number
   thumbnail_api_url: string
   final_video_available: boolean
@@ -176,6 +203,7 @@ export type BilibiliPublishMetadata = {
   title: string
   description: string
   source: string
+  copyright: number
   tags: string[]
   tid: number | null
 }
@@ -406,7 +434,15 @@ export function getLocalizedMetadata(taskId: string) {
 }
 
 export function generateLocalizedMetadata(taskId: string) {
-  return request<LocalizedMetadata>(`/api/tasks/${taskId}/metadata/localized`, { method: "POST" })
+  return request<MetadataJobStatus>(`/api/tasks/${taskId}/metadata/localized`, { method: "POST" })
+}
+
+export function generateTaskThumbnail(taskId: string) {
+  return request<MetadataJobStatus>(`/api/tasks/${taskId}/metadata/thumbnail`, { method: "POST" })
+}
+
+export function getMetadataJobStatus(taskId: string, operation: "localized" | "thumbnail") {
+  return request<MetadataJobStatus>(`/api/tasks/${taskId}/metadata/jobs/${operation}`)
 }
 
 export function thumbnailUrl(path: string) {
@@ -518,6 +554,7 @@ export function saveOpenAISettings(settings: {
   model: string
   preprocess_model: string
   metadata_model: string
+  thumbnail_prompt_model: string
   translate_concurrency: string
   translate_use_batch: boolean
 }) {
