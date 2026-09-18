@@ -68,6 +68,12 @@ def _ydl_base(source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
         "js_runtimes": {"node": {}},
         "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
     }
+    if source.name == "youtube":
+        # Logged-in cookies currently select YouTube's broken tv_downgraded
+        # client by default. Keep a web fallback until yt-dlp changes it.
+        opts["extractor_args"] = {
+            "youtube": {"player_client": ["default", "web_embedded"]}
+        }
     cookie_path = source.cookie_path
     if cookie_path and cookie_path.exists() and cookie_path.stat().st_size > 0:
         opts["cookiefile"] = str(cookie_path)

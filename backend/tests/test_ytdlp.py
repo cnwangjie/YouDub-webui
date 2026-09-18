@@ -4,7 +4,7 @@ from backend.app.adapters import ytdlp
 from backend.app.sources import SourceConfig
 
 
-def _make_source(*, use_proxy: bool, cookie_dir: Path) -> SourceConfig:
+def _make_source(*, use_proxy: bool, cookie_dir: Path, name: str = "test") -> SourceConfig:
     cookie_path = cookie_dir / "missing-cookie.txt"
 
     class _Source(SourceConfig):
@@ -13,7 +13,7 @@ def _make_source(*, use_proxy: bool, cookie_dir: Path) -> SourceConfig:
             return cookie_path
 
     return _Source(
-        name="test",
+        name=name,
         matches=lambda url: True,
         use_proxy=use_proxy,
         cookie_filename="missing-cookie.txt",
@@ -55,6 +55,24 @@ def test_ytdlp_enables_node_js_runtime(tmp_path):
     options = ytdlp._ydl_base(source, "")
 
     assert options["js_runtimes"] == {"node": {}}
+
+
+def test_ytdlp_uses_working_clients_for_youtube(tmp_path):
+    source = _make_source(use_proxy=True, cookie_dir=tmp_path, name="youtube")
+
+    options = ytdlp._ydl_base(source, "")
+
+    assert options["extractor_args"] == {
+        "youtube": {"player_client": ["default", "web_embedded"]}
+    }
+
+
+def test_ytdlp_does_not_set_youtube_clients_for_other_sources(tmp_path):
+    source = _make_source(use_proxy=False, cookie_dir=tmp_path, name="bilibili")
+
+    options = ytdlp._ydl_base(source, "")
+
+    assert "extractor_args" not in options
 
 
 def test_ytdlp_format_candidates_start_with_backend_format():
