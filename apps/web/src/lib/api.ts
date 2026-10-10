@@ -166,6 +166,12 @@ export type BilibiliPublishStatus = {
   message: string
   error: string
   result: unknown
+  title?: string
+  description?: string
+  source?: string
+  copyright?: number
+  tags?: string[]
+  tid?: number
 }
 
 export type TaskPublishStatus = "unpublished" | "draft" | "running" | "succeeded" | "failed"

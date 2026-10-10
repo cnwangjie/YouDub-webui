@@ -600,6 +600,7 @@ def localize_metadata(
     source: SourceConfig,
     partition_options: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    existing = load_artifact(session) or {}
     info = json.loads(metadata_file(session).read_text(encoding="utf-8"))
     title = str(info.get("title") or "").strip()
     description = _description(info)
@@ -609,7 +610,30 @@ def localize_metadata(
     source_url = _source_url(info)
     partition_options = partition_options or []
     thumbnail_url = _thumbnail_url(info)
-    thumbnail_file = download_thumbnail(session, thumbnail_url)
+    downloaded_thumbnail = download_thumbnail(session, thumbnail_url)
+    existing_source_value = str(existing.get("source_thumbnail_file") or "").strip()
+    existing_source = Path(existing_source_value) if existing_source_value else None
+    source_thumbnail = (
+        existing_source
+        if existing_source and existing_source.exists()
+        else downloaded_thumbnail
+    )
+    existing_cover_candidates = (
+        existing.get("translated_thumbnail_file"),
+        existing.get("generated_thumbnail_file"),
+        (existing.get("thumbnail_generation") or {}).get("output_file")
+        if isinstance(existing.get("thumbnail_generation"), dict)
+        else None,
+        existing.get("thumbnail_file"),
+    )
+    preserved_cover: Path | None = None
+    for value in existing_cover_candidates:
+        candidate_value = str(value or "").strip()
+        candidate = Path(candidate_value) if candidate_value else None
+        if candidate and candidate.exists():
+            preserved_cover = candidate
+            break
+    thumbnail_file = preserved_cover or source_thumbnail
 
     settings = get_openai_settings()
     model = str(settings.get("metadata_model") or "").strip() or settings["model"]
@@ -662,12 +686,20 @@ def localize_metadata(
         "description": description,
         "tags": tags,
         "thumbnail_url": thumbnail_url,
-        "source_thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
+        "source_thumbnail_file": str(source_thumbnail) if source_thumbnail else "",
         "thumbnail_file": str(thumbnail_file) if thumbnail_file else "",
-        "translated_thumbnail_file": "",
-        "generated_thumbnail_file": "",
-        "thumbnail_translation": {},
-        "thumbnail_generation": {},
+        "translated_thumbnail_file": str(existing.get("translated_thumbnail_file") or "")
+        if preserved_cover
+        else "",
+        "generated_thumbnail_file": str(existing.get("generated_thumbnail_file") or "")
+        if preserved_cover
+        else "",
+        "thumbnail_translation": existing.get("thumbnail_translation") or {}
+        if preserved_cover
+        else {},
+        "thumbnail_generation": existing.get("thumbnail_generation") or {}
+        if preserved_cover
+        else {},
         "translated_title": translated_title,
         "translated_description": translated_description,
         "translated_tags": translated_tags,

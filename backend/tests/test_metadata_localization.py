@@ -85,6 +85,79 @@ def test_localize_metadata_uses_metadata_model(monkeypatch, tmp_path):
     )
 
 
+def test_localize_metadata_preserves_generated_thumbnail(monkeypatch, tmp_path):
+    session = tmp_path / "session"
+    metadata = session / "metadata"
+    media = session / "media"
+    metadata.mkdir(parents=True)
+    media.mkdir(parents=True)
+    source_thumbnail = media / "thumbnail.jpg"
+    generated_thumbnail = media / "thumbnail.localized.png"
+    source_thumbnail.write_bytes(b"source")
+    generated_thumbnail.write_bytes(b"generated")
+    (metadata / "ytdlp_info.json").write_text(
+        json.dumps(
+            {
+                "title": "Original",
+                "thumbnail": "https://example.com/thumbnail.jpg",
+                "webpage_url": "https://www.youtube.com/watch?v=abcdefghijk",
+            }
+        ),
+        encoding="utf-8",
+    )
+    generation = {"mode": "edit", "output_file": str(generated_thumbnail), "prompt": "keep it"}
+    translation = {"model": "gpt-image-2", "error": ""}
+    (metadata / "localized_metadata.json").write_text(
+        json.dumps(
+            {
+                "source_thumbnail_file": str(source_thumbnail),
+                "thumbnail_file": str(generated_thumbnail),
+                "translated_thumbnail_file": str(generated_thumbnail),
+                "generated_thumbnail_file": "",
+                "thumbnail_translation": translation,
+                "thumbnail_generation": generation,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metadata_localization,
+        "get_openai_settings",
+        lambda: {
+            "base_url": "https://example.com/v1",
+            "api_key": "sk-test",
+            "model": "main-model",
+            "metadata_model": "metadata-model",
+        },
+    )
+    monkeypatch.setattr(metadata_localization, "_client", lambda base_url, api_key: object())
+    monkeypatch.setattr(
+        metadata_localization,
+        "_call_json",
+        lambda *args, **kwargs: {
+            "translated_title": "翻译标题",
+            "translated_description": "翻译简介",
+            "translated_tags": ["人工智能"],
+            "bilibili_title": "【中配】翻译标题",
+            "bilibili_description": "Bilibili 简介",
+            "bilibili_tags": ["人工智能"],
+            "bilibili_tid": 201,
+        },
+    )
+    monkeypatch.setattr(metadata_localization, "download_thumbnail", lambda session, url: source_thumbnail)
+
+    payload = metadata_localization.localize_metadata(
+        session,
+        detect_source("https://www.youtube.com/watch?v=abcdefghijk"),
+    )
+
+    assert payload["source_thumbnail_file"] == str(source_thumbnail)
+    assert payload["thumbnail_file"] == str(generated_thumbnail)
+    assert payload["translated_thumbnail_file"] == str(generated_thumbnail)
+    assert payload["thumbnail_translation"] == translation
+    assert payload["thumbnail_generation"] == generation
+
+
 def test_bilibili_publish_fields_use_localized_publish_metadata(tmp_path):
     session = tmp_path / "session"
     metadata = session / "metadata"

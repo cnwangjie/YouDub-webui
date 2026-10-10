@@ -1,17 +1,19 @@
 "use client"
 
-import Link from "next/link"
 import { useRouter } from "next/navigation"
+import QRCode from "qrcode"
 import { use, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowDownToLine,
   CheckCircle2,
   Circle,
   Download,
+  ExternalLink,
   FileText,
   Image as ImageIcon,
   Loader2,
   Play,
+  QrCode,
   RotateCw,
   Send,
   Tags,
@@ -20,24 +22,33 @@ import {
 } from "lucide-react"
 
 import {
+  BilibiliCredentialsStatus,
+  BilibiliPartition,
+  BilibiliPublishStatus,
   ExecutionMode,
   LocalizedMetadata,
   MetadataJobStatus,
   StageStatus,
   Task,
   cancelTask,
+  createBilibiliQrCode,
   continueTask,
   deleteTask,
   finalVideoDownloadUrl,
   finalVideoUrl,
   generateLocalizedMetadata,
   generateTaskThumbnail,
+  getBilibiliCredentialsStatus,
+  getBilibiliPublishStatus,
   getMetadataJobStatus,
   getTask,
   getTaskLog,
+  listBilibiliPartitions,
+  pollBilibiliQrCode,
   redoStage,
   rerunTask,
   resumeTask,
+  startBilibiliPublish,
   thumbnailUrl,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
@@ -62,6 +73,27 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { Progress } from "@/components/ui/progress"
+import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
+
+type BilibiliPublishEdit = {
+  title: string
+  description: string
+  source: string
+  copyright: string
+  tags: string
+  tid: string
+}
+
+const EMPTY_BILIBILI_EDIT: BilibiliPublishEdit = {
+  title: "",
+  description: "",
+  source: "",
+  copyright: "1",
+  tags: "",
+  tid: "",
+}
 
 function stageIcon(status: StageStatus) {
   if (status === "succeeded") return <CheckCircle2 className="size-5 text-[#00aeec]" />
@@ -106,11 +138,21 @@ function normalizeProgress(value: number | null | undefined) {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
+function bilibiliResultUrl(result: unknown) {
+  if (!result || typeof result !== "object") return ""
+  const root = result as Record<string, unknown>
+  const data = root.data && typeof root.data === "object" ? root.data as Record<string, unknown> : root
+  const bvid = typeof data.bvid === "string" ? data.bvid : ""
+  return bvid ? `https://www.bilibili.com/video/${bvid}` : ""
+}
+
 export default function TaskDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const router = useRouter()
   const { stageLabel, statusLabel, t } = useI18n()
   const logRef = useRef<HTMLDivElement | null>(null)
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const bilibiliMetadataKeyRef = useRef("")
   const [task, setTask] = useState<Task | null>(null)
   const [log, setLog] = useState("")
   const [followLog, setFollowLog] = useState(true)
@@ -137,6 +179,58 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [metadataJobOpen, setMetadataJobOpen] = useState(false)
   const [metadataJob, setMetadataJob] = useState<MetadataJobStatus | null>(null)
   const [localizedMetadataError, setLocalizedMetadataError] = useState("")
+  const [bilibiliCredentials, setBilibiliCredentials] = useState<BilibiliCredentialsStatus | null>(null)
+  const [bilibiliPartitions, setBilibiliPartitions] = useState<BilibiliPartition[]>([])
+  const [bilibiliPublishStatus, setBilibiliPublishStatus] = useState<BilibiliPublishStatus | null>(null)
+  const [bilibiliEdit, setBilibiliEdit] = useState<BilibiliPublishEdit>(EMPTY_BILIBILI_EDIT)
+  const [bilibiliLoading, setBilibiliLoading] = useState(false)
+  const [bilibiliError, setBilibiliError] = useState("")
+  const [bilibiliQr, setBilibiliQr] = useState<{ authCode: string; url: string } | null>(null)
+  const [bilibiliQrMessage, setBilibiliQrMessage] = useState("")
+  const [creatingBilibiliQr, setCreatingBilibiliQr] = useState(false)
+
+  const loadBilibiliPartitions = async () => {
+    const result = await listBilibiliPartitions()
+    setBilibiliPartitions(result.partitions)
+  }
+
+  const handleCreateBilibiliQr = async () => {
+    setCreatingBilibiliQr(true)
+    setBilibiliError("")
+    setBilibiliQrMessage("")
+    try {
+      const result = await createBilibiliQrCode()
+      setBilibiliQr({ authCode: result.data.auth_code, url: result.data.url })
+    } catch (err) {
+      setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliQrError)
+    } finally {
+      setCreatingBilibiliQr(false)
+    }
+  }
+
+  const handleBilibiliPublish = async () => {
+    setBilibiliLoading(true)
+    setBilibiliError("")
+    try {
+      const status = await startBilibiliPublish(id, {
+        title: bilibiliEdit.title.trim(),
+        description: bilibiliEdit.description.trim(),
+        source: bilibiliEdit.source.trim(),
+        copyright: Number(bilibiliEdit.copyright) || 1,
+        tags: bilibiliEdit.tags
+          .replaceAll("，", ",")
+          .split(/[,\n]/)
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        tid: bilibiliEdit.tid ? Number(bilibiliEdit.tid) : null,
+      })
+      setBilibiliPublishStatus(status)
+    } catch (err) {
+      setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliPublishError)
+    } finally {
+      setBilibiliLoading(false)
+    }
+  }
 
   const handleDelete = async () => {
     setDeleting(true)
@@ -296,6 +390,120 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       window.clearInterval(timer)
     }
   }, [id, metadataJobOperation, metadataJobStatus, t.task.metadataJobError])
+
+  useEffect(() => {
+    const metadata = localizedMetadata?.bilibili
+    if (!metadata) return
+    const key = JSON.stringify(metadata)
+    if (key === bilibiliMetadataKeyRef.current) return
+    bilibiliMetadataKeyRef.current = key
+    setBilibiliEdit({
+      title: metadata.title || "",
+      description: metadata.description || "",
+      source: metadata.source || task?.url || "",
+      copyright: "1",
+      tags: (metadata.tags || []).join(", "),
+      tid: metadata.tid ? String(metadata.tid) : "",
+    })
+  }, [localizedMetadata, task?.url])
+
+  useEffect(() => {
+    if (task?.status !== "succeeded" || !task.final_video_path) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const [credentials, status] = await Promise.all([
+          getBilibiliCredentialsStatus(),
+          getBilibiliPublishStatus(id),
+        ])
+        if (cancelled) return
+        setBilibiliCredentials(credentials)
+        setBilibiliPublishStatus(status)
+        if (status.title || status.description || status.tags?.length) {
+          setBilibiliEdit({
+            title: status.title || "",
+            description: status.description || "",
+            source: status.source || task.url,
+            copyright: status.copyright ? String(status.copyright) : "1",
+            tags: (status.tags || []).join(", "),
+            tid: status.tid ? String(status.tid) : "",
+          })
+        }
+        if (credentials.configured) await loadBilibiliPartitions()
+      } catch (err) {
+        if (!cancelled) setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliPublishError)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [id, task?.final_video_path, task?.status, task?.url, t.task.bilibiliPublishError])
+
+  useEffect(() => {
+    if (bilibiliPublishStatus?.status !== "running") return
+    let cancelled = false
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await getBilibiliPublishStatus(id)
+        if (cancelled) return
+        setBilibiliPublishStatus(status)
+        if (status.status !== "running") window.clearInterval(timer)
+      } catch (err) {
+        if (!cancelled) {
+          setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliPublishError)
+          window.clearInterval(timer)
+        }
+      }
+    }, 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [bilibiliPublishStatus?.status, id, t.task.bilibiliPublishError])
+
+  useEffect(() => {
+    if (!bilibiliQr?.url || !qrCanvasRef.current) return
+    QRCode.toCanvas(qrCanvasRef.current, bilibiliQr.url, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      scale: 6,
+      width: 180,
+    }).catch((err: unknown) => {
+      setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliQrError)
+    })
+  }, [bilibiliQr?.url, t.task.bilibiliQrError])
+
+  useEffect(() => {
+    if (!bilibiliQr?.authCode) return
+    let cancelled = false
+    const timer = window.setInterval(async () => {
+      try {
+        const result = await pollBilibiliQrCode(bilibiliQr.authCode)
+        if (cancelled) return
+        if (result.status === "pending") {
+          setBilibiliQrMessage(result.message || t.task.bilibiliWaitingScan)
+          return
+        }
+        if (result.status === "succeeded") {
+          setBilibiliQrMessage(t.task.bilibiliLoginSaved)
+          setBilibiliQr(null)
+          setBilibiliCredentials(await getBilibiliCredentialsStatus())
+          await loadBilibiliPartitions()
+          window.clearInterval(timer)
+          return
+        }
+        setBilibiliError(result.message || t.task.bilibiliLoginError)
+        window.clearInterval(timer)
+      } catch (err) {
+        if (!cancelled) setBilibiliError(err instanceof Error ? err.message : t.task.bilibiliLoginError)
+      }
+    }, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [bilibiliQr, t.task.bilibiliLoginError, t.task.bilibiliLoginSaved, t.task.bilibiliWaitingScan])
 
   const scrollLogToBottom = (behavior: ScrollBehavior = "smooth") => {
     const element = logRef.current
@@ -585,9 +793,186 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                   <Download className="size-4" />
                   {t.task.download}
                 </Button>
-                <Button variant="outline" nativeButton={false} render={<Link href="/bilibili" />}>
-                  <Send className="size-4" />
-                  {t.task.bilibiliPublish}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {task?.status === "succeeded" && task.final_video_path ? (
+          <Card>
+            <CardHeader className="gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <CardTitle>{t.task.bilibiliPublish}</CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">{t.task.bilibiliPublishHelp}</p>
+                </div>
+                <Badge variant={bilibiliPublishStatus?.status === "failed" ? "destructive" : "secondary"}>
+                  {bilibiliPublishStatus?.status === "running"
+                    ? t.bilibili.running
+                    : bilibiliPublishStatus?.status === "succeeded"
+                      ? t.bilibili.succeeded
+                      : bilibiliPublishStatus?.status === "failed"
+                        ? t.bilibili.failed
+                        : t.bilibili.draft}
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {bilibiliError || bilibiliPublishStatus?.error ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {bilibiliError || bilibiliPublishStatus?.error}
+                </div>
+              ) : null}
+
+              {!bilibiliCredentials?.configured ? (
+                <div className="space-y-3 border-b pb-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">{t.task.bilibiliLoginMissing}</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{t.task.bilibiliQrHelp}</p>
+                    </div>
+                    <Button variant="outline" onClick={handleCreateBilibiliQr} disabled={creatingBilibiliQr}>
+                      {creatingBilibiliQr ? <Loader2 className="size-4 animate-spin" /> : <QrCode className="size-4" />}
+                      {creatingBilibiliQr ? t.task.bilibiliCreatingQr : t.task.bilibiliScanLogin}
+                    </Button>
+                  </div>
+                  {bilibiliQr ? (
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                      <canvas ref={qrCanvasRef} aria-label="Bilibili QR login" className="size-[180px] rounded-md border bg-white p-2" />
+                      <p className="text-sm text-muted-foreground">
+                        {bilibiliQrMessage || t.task.bilibiliWaitingScan}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {bilibiliPublishStatus?.status === "running" ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <Progress value={normalizeProgress(bilibiliPublishStatus.progress) ?? 0} className="min-w-0 flex-1" />
+                    <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
+                      {normalizeProgress(bilibiliPublishStatus.progress) ?? 0}%
+                    </span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">{bilibiliPublishStatus.message}</p>
+                </div>
+              ) : null}
+
+              <div className="grid gap-3">
+                <div className="grid gap-1">
+                  <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-title">
+                    {t.bilibili.metadataTitle}
+                  </label>
+                  <Input
+                    id="bilibili-title"
+                    maxLength={80}
+                    value={bilibiliEdit.title}
+                    onChange={(event) => setBilibiliEdit((current) => ({ ...current, title: event.target.value }))}
+                    disabled={bilibiliPublishStatus?.status === "running"}
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-description">
+                    {t.bilibili.metadataDescription}
+                  </label>
+                  <Textarea
+                    id="bilibili-description"
+                    maxLength={2000}
+                    rows={6}
+                    value={bilibiliEdit.description}
+                    onChange={(event) => setBilibiliEdit((current) => ({ ...current, description: event.target.value }))}
+                    disabled={bilibiliPublishStatus?.status === "running"}
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="grid gap-1">
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-partition">
+                      {t.bilibili.metadataPartition}
+                    </label>
+                    <Select
+                      value={bilibiliEdit.tid}
+                      onValueChange={(value) => setBilibiliEdit((current) => ({ ...current, tid: value ?? "" }))}
+                      disabled={bilibiliPublishStatus?.status === "running"}
+                    >
+                      <SelectTrigger id="bilibili-partition">
+                        <SelectValue placeholder={t.bilibili.selectPartition} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {bilibiliPartitions.map((partition) => (
+                          <SelectItem key={partition.id} value={String(partition.id)}>{partition.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1">
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-copyright">
+                      {t.bilibili.metadataCopyright}
+                    </label>
+                    <Select
+                      value={bilibiliEdit.copyright}
+                      onValueChange={(value) => setBilibiliEdit((current) => ({ ...current, copyright: value ?? "1" }))}
+                      disabled={bilibiliPublishStatus?.status === "running"}
+                    >
+                      <SelectTrigger id="bilibili-copyright"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">{t.bilibili.copyrightOriginal}</SelectItem>
+                        <SelectItem value="2">{t.bilibili.copyrightRepost}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-1">
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-source">
+                      {t.bilibili.metadataSource}
+                    </label>
+                    <Input
+                      id="bilibili-source"
+                      value={bilibiliEdit.source}
+                      onChange={(event) => setBilibiliEdit((current) => ({ ...current, source: event.target.value }))}
+                      disabled={bilibiliPublishStatus?.status === "running"}
+                    />
+                  </div>
+                </div>
+                <div className="grid gap-1">
+                  <label className="text-xs font-medium text-muted-foreground" htmlFor="bilibili-tags">
+                    {t.bilibili.metadataTags}
+                  </label>
+                  <Input
+                    id="bilibili-tags"
+                    value={bilibiliEdit.tags}
+                    onChange={(event) => setBilibiliEdit((current) => ({ ...current, tags: event.target.value }))}
+                    disabled={bilibiliPublishStatus?.status === "running"}
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {bilibiliResultUrl(bilibiliPublishStatus?.result) ? (
+                  <Button
+                    variant="outline"
+                    nativeButton={false}
+                    render={<a href={bilibiliResultUrl(bilibiliPublishStatus?.result)} target="_blank" rel="noreferrer" />}
+                  >
+                    <ExternalLink className="size-4" />
+                    {t.bilibili.openBilibili}
+                  </Button>
+                ) : null}
+                <Button
+                  onClick={handleBilibiliPublish}
+                  disabled={
+                    bilibiliLoading ||
+                    bilibiliPublishStatus?.status === "running" ||
+                    !bilibiliCredentials?.configured ||
+                    !bilibiliEdit.title.trim() ||
+                    !bilibiliEdit.tid
+                  }
+                >
+                  {bilibiliLoading || bilibiliPublishStatus?.status === "running" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Send className="size-4" />
+                  )}
+                  {bilibiliPublishStatus?.status === "running" ? t.task.bilibiliPublishing : t.task.bilibiliPublishButton}
                 </Button>
               </div>
             </CardContent>
